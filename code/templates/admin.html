@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Notion Clone</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body>
+<div id="app">
+<div id="sidebar">
+<div id="sidebar-header">
+<span>Pages</span>
+<button id="new-page-btn" title="New page">+</button>
+</div>
+<input id="page-search" type="text" placeholder="Search pages...">
+<div id="page-tree"></div>
+</div>
+<div id="main-area">
+<div id="empty-state">
+<p>Select or create a page to get started</p>
+</div>
+<div id="page-editor" style="display:none">
+<div id="page-header">
+<button id="page-icon-btn" title="Change icon">📄</button>
+<input id="page-title" type="text" placeholder="Untitled">
+<div id="page-actions">
+<button id="share-btn" title="Share">Share</button>
+<button id="comments-btn" title="Comments">Comments</button>
+<button id="delete-page-btn" title="Delete page">🗑️</button>
+</div>
+</div>
+<div id="blocks-container" contenteditable="true" spellcheck="true"></div>
+</div>
+</div>
+<div id="comments-panel" style="display:none">
+<div id="comments-panel-header">
+<h3>Comments</h3>
+<button id="close-comments-btn">&times;</button>
+</div>
+<div id="comments-list"></div>
+</div>
+<div id="shares-panel" style="display:none">
+<div id="shares-panel-header">
+<h3>Share</h3>
+<button id="close-shares-btn">&times;</button>
+</div>
+<div id="shares-list"></div>
+<div id="new-share-form">
+<input type="text" id="share-alias" placeholder="Name">
+<select id="share-key-type">
+<option value="viewer">Viewer</option>
+<option value="commenter">Commenter</option>
+<option value="editor">Editor</option>
+</select>
+<button id="create-share-btn">Create Link</button>
+</div>
+</div>
+</div>
+<div id="slash-menu" class="popup-menu" style="display:none"></div>
+<div id="emoji-picker" style="display:none"></div>
+<div id="page-link-modal" style="display:none">
+<div id="page-link-modal-content">
+<input type="text" id="page-link-search" placeholder="Search pages...">
+<div id="page-link-results"></div>
+</div>
+</div>
+<div id="comment-float-btn" style="display:none">Comment</div>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/solidity.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/toml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/dockerfile.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/nginx.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/graphql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/protobuf.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

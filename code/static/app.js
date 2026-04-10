@@ -1,1508 +1,2319 @@
-// --- State ---
-let adminKey = localStorage.getItem('admin_key') || '';
-let currentPageId = null;
-let autoSaveTimer = null;
-let slashState = null; // { blockEl, startOffset }
-let dragState = null;  // { el, startY }
-let pendingCommentData = null; // { highlightedText, blockId, range }
+(function() {
+'use strict';
 
-const SLASH_ITEMS = [
-  { type: 'paragraph', label: 'Text', icon: 'Aa' },
-  { type: 'heading1', label: 'Heading 1', icon: 'H1' },
-  { type: 'heading2', label: 'Heading 2', icon: 'H2' },
-  { type: 'heading3', label: 'Heading 3', icon: 'H3' },
-  { type: 'bullet_list', label: 'Bullet List', icon: '•' },
-  { type: 'numbered_list', label: 'Numbered List', icon: '1.' },
-  { type: 'todo', label: 'To-do', icon: '☑' },
-  { type: 'toggle', label: 'Toggle', icon: '▶' },
-  { type: 'quote', label: 'Quote', icon: '"' },
-  { type: 'code', label: 'Code', icon: '</>' },
-  { type: 'callout', label: 'Callout', icon: '💡' },
-  { type: 'divider', label: 'Divider', icon: '—' },
-  { type: 'image', label: 'Image', icon: '🖼' },
+// ---- State ----
+var currentPageId = null;
+var currentPage = null;
+var allPages = [];
+var allComments = [];
+var autoSaveTimer = null;
+var pollTimer = null;
+var slashQuery = '';
+var slashBlockId = null;
+var expandedPages = JSON.parse(localStorage.getItem('expanded_pages') || '{}');
+var draggedBlockId = null;
+var draggedPageId = null;
+
+var SLASH_ITEMS = [
+	{ type: 'paragraph', label: 'Text', icon: '📝', keywords: 'paragraph text' },
+	{ type: 'heading1', label: 'Heading 1', icon: 'H1', keywords: 'heading h1 title' },
+	{ type: 'heading2', label: 'Heading 2', icon: 'H2', keywords: 'heading h2' },
+	{ type: 'heading3', label: 'Heading 3', icon: 'H3', keywords: 'heading h3' },
+	{ type: 'bullet_list', label: 'Bullet List', icon: '•', keywords: 'bullet list unordered' },
+	{ type: 'numbered_list', label: 'Numbered List', icon: '1.', keywords: 'numbered list ordered' },
+	{ type: 'todo', label: 'To-do', icon: '☑', keywords: 'todo checkbox task' },
+	{ type: 'toggle', label: 'Toggle', icon: '▶', keywords: 'toggle expandable' },
+	{ type: 'quote', label: 'Quote', icon: '❝', keywords: 'quote blockquote' },
+	{ type: 'callout', label: 'Callout', icon: '💡', keywords: 'callout info' },
+	{ type: 'code', label: 'Code', icon: '&lt;&gt;', keywords: 'code snippet programming' },
+	{ type: 'divider', label: 'Divider', icon: '─', keywords: 'divider line separator' },
+	{ type: 'image', label: 'Image', icon: '🖼', keywords: 'image picture photo' },
+	{ type: 'file', label: 'File', icon: '📎', keywords: 'file attachment upload' },
+	{ type: 'page_link', label: 'Page Link', icon: '📄', keywords: 'page link reference' },
+	{ type: 'table', label: 'Table', icon: '📊', keywords: 'table grid data' },
+	{ type: 'math', label: 'Math Equation', icon: '∑', keywords: 'math latex equation katex' }
 ];
-let slashActiveIndex = 0;
-let filteredSlashItems = [];
 
-// --- API ---
-async function api(method, path, body) {
-  const opts = {
-    method,
-    headers: { 'X-Admin-Key': adminKey },
-  };
-  if (body && !(body instanceof FormData)) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  } else if (body instanceof FormData) {
-    opts.body = body;
-  }
-  const res = await fetch(path, opts);
-  if (res.status === 401) {
-    adminKey = '';
-    localStorage.removeItem('admin_key');
-    showLogin();
-    return null;
-  }
-  return res.json();
+var EMOJIS = ['📄','📝','📋','📌','📎','📁','📂','🗂','📊','📈','📉','🗒','🗓','📅','📆','🔖','🏷','💡','🔍','🔎','⭐','🌟','💫','✨','🔥','💥','❤️','💙','💚','💛','💜','🧡','🖤','🤍','🏠','🏢','🏗','🌍','🌎','🌏','🚀','✈️','🎯','🎨','🎭','🎪','🎬','🎮','🕹','🎲','🎸','🎵','🎶','📻','📺','📷','📸','💻','🖥','⌨️','🖱','🖨','📱','📞','☎️','🔧','🔨','⚙️','🔩','🛠','⛏','🗡','🔪','💣','🧲','🧪','🧫','🧬','🔬','🔭','📡','🛡','🔑','🗝','🔒','🔓','💰','💳','💎','⚡','🔋','☀️','🌙','⛅','🌧','❄️','🌊','🌸','🌺','🌻','🌹','🍀','🌿','🍁','🌴','🌵','🍎','🍊','🍋','🍇','🍉','🍓','🥝','🍕','🍔','🍟','☕','🍵','🥤','🍺','🧁','🎂','🍰','🧀','🥚','🍳','✅','❌','⚠️','❓','❗','💬','💭','🗨','👍','👎','👏','🙌','🤝','✊','👊','✌️','🤞','👋','🖐','✋','👆','👇','👈','👉','☝️'];
+
+// ---- API helpers ----
+function api(method, path, body) {
+	var opts = { method: method, headers: {} };
+	if (body && !(body instanceof FormData)) {
+		opts.headers['Content-Type'] = 'application/json';
+		opts.body = JSON.stringify(body);
+	} else if (body instanceof FormData) {
+		opts.body = body;
+	}
+	return fetch(path, opts).then(function(r) {
+		if (!r.ok) throw new Error('HTTP ' + r.status);
+		return r.json();
+	});
 }
 
-// --- DOM helpers ---
-const $ = (s, el) => (el || document).querySelector(s);
-const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
+// ---- Init ----
+function init() {
+	loadPages().then(function() {
+		// Check for ?page= parameter
+		var params = new URLSearchParams(window.location.search);
+		var pageParam = params.get('page');
+		if (pageParam) {
+			selectPage(pageParam);
+			window.history.replaceState({}, '', '/');
+		} else {
+			var lastPageId = localStorage.getItem('last_page_id');
+			if (lastPageId && allPages.find(function(p) { return p.id === lastPageId; })) {
+				selectPage(lastPageId);
+			}
+		}
+	});
 
-// --- Init ---
-document.addEventListener('DOMContentLoaded', () => {
-  if (!adminKey) {
-    showLogin();
-  } else {
-    showApp();
-  }
-  bindEvents();
-});
+	document.getElementById('new-page-btn').addEventListener('click', function() {
+		createNewPage(null);
+	});
+	document.getElementById('page-title').addEventListener('input', function() {
+		if (currentPageId) {
+			currentPage.title = this.value;
+			scheduleAutoSave();
+		}
+	});
+	document.getElementById('delete-page-btn').addEventListener('click', deletePage);
+	document.getElementById('share-btn').addEventListener('click', toggleSharesPanel);
+	document.getElementById('comments-btn').addEventListener('click', toggleCommentsPanel);
+	document.getElementById('close-comments-btn').addEventListener('click', function() {
+		document.getElementById('comments-panel').style.display = 'none';
+	});
+	document.getElementById('close-shares-btn').addEventListener('click', function() {
+		document.getElementById('shares-panel').style.display = 'none';
+	});
+	document.getElementById('create-share-btn').addEventListener('click', createShare);
 
-function showLogin() {
-  $('#login-overlay').style.display = 'flex';
-  $('#app').style.display = 'none';
-  setTimeout(() => $('#login-key').focus(), 50);
+	var container = document.getElementById('blocks-container');
+	container.addEventListener('input', handleInput);
+	container.addEventListener('keydown', handleKeyDown);
+	container.addEventListener('click', handleEditorClick);
+	container.addEventListener('paste', handlePaste);
+
+	// Drag and drop for blocks
+	container.addEventListener('dragstart', handleBlockDragStart);
+	container.addEventListener('dragover', handleBlockDragOver);
+	container.addEventListener('dragleave', handleBlockDragLeave);
+	container.addEventListener('drop', handleBlockDrop);
+	container.addEventListener('dragend', handleBlockDragEnd);
+
+	// Floating comment button
+	document.addEventListener('mouseup', handleTextSelection);
+	document.getElementById('comment-float-btn').addEventListener('mousedown', function(e) {
+		e.preventDefault();
+		createCommentFromSelection();
+	});
+
+	// Track cursor for placeholder
+	document.addEventListener('selectionchange', updateCursorBlock);
+
+	// Search
+	document.getElementById('page-search').addEventListener('input', handlePageSearch);
+
+	// Close menus on outside click
+	document.addEventListener('mousedown', function(e) {
+		var slash = document.getElementById('slash-menu');
+		if (slash.style.display !== 'none' && !slash.contains(e.target)) {
+			hideSlashMenu();
+		}
+		var emoji = document.getElementById('emoji-picker');
+		if (emoji.style.display !== 'none' && !emoji.contains(e.target) && e.target.id !== 'page-icon-btn') {
+			emoji.style.display = 'none';
+		}
+		var modal = document.getElementById('page-link-modal');
+		if (modal.style.display !== 'none') {
+			var content = document.getElementById('page-link-modal-content');
+			if (!content.contains(e.target)) {
+				modal.style.display = 'none';
+			}
+		}
+	});
+
+	// Escape key closes menus
+	document.addEventListener('keydown', function(e) {
+		if (e.key === 'Escape') {
+			hideSlashMenu();
+			document.getElementById('emoji-picker').style.display = 'none';
+			document.getElementById('page-link-modal').style.display = 'none';
+			document.getElementById('comment-float-btn').style.display = 'none';
+		}
+	});
+
+	// Emoji picker
+	document.getElementById('page-icon-btn').addEventListener('click', toggleEmojiPicker);
+
+	// beforeunload saves
+	window.addEventListener('beforeunload', function() {
+		if (autoSaveTimer) {
+			clearTimeout(autoSaveTimer);
+			autoSaveTimer = null;
+			doSave();
+		}
+	});
+
+	// Start polling
+	startPolling();
 }
 
-function showApp() {
-  $('#login-overlay').style.display = 'none';
-  $('#app').style.display = 'flex';
-  loadPages();
+// ---- Pages ----
+function loadPages() {
+	return api('GET', '/api/pages').then(function(pages) {
+		allPages = pages;
+		renderPageTree();
+	});
 }
 
-// --- Events ---
-function bindEvents() {
-  // Login
-  $('#login-btn').onclick = doLogin;
-  $('#login-key').onkeydown = e => { if (e.key === 'Enter') doLogin(); };
+function renderPageTree() {
+	var search = document.getElementById('page-search').value.trim().toLowerCase();
+	var tree = document.getElementById('page-tree');
+	tree.innerHTML = '';
 
-  // Sidebar
-  $('#new-page-btn').onclick = createPage;
+	if (search) {
+		// Flat filtered list
+		allPages.forEach(function(p) {
+			if (p.title.toLowerCase().indexOf(search) !== -1) {
+				var item = createPageItem(p);
+				tree.appendChild(item);
+			}
+		});
+		return;
+	}
 
-  // Topbar
-  $('#page-title').oninput = () => scheduleAutoSave();
-  $('#icon-btn').onclick = pickIcon;
-  $('#share-btn').onclick = openShareModal;
-  $('#comments-btn').onclick = toggleCommentsSidebar;
-  $('#delete-page-btn').onclick = deletePage;
-
-  // Editor container
-  const container = $('#blocks-container');
-  container.addEventListener('input', handleInput);
-  container.addEventListener('keydown', handleKeyDown);
-  container.addEventListener('click', handleEditorClick);
-  container.addEventListener('dragstart', handleDragStart);
-  container.addEventListener('dragover', handleDragOver);
-  container.addEventListener('drop', handleDrop);
-  container.addEventListener('dragend', handleDragEnd);
-
-  // Text selection for comments
-  document.addEventListener('mouseup', handleTextSelection);
-
-  // Floating comment button
-  $('#floating-comment-btn').addEventListener('mousedown', e => {
-    e.preventDefault(); // preserve selection
-  });
-  $('#floating-comment-btn').addEventListener('click', startCommentFromSelection);
-
-  // Comments sidebar
-  $('#close-comments-btn').onclick = () => {
-    $('#comments-sidebar').style.display = 'none';
-  };
-  $('#cancel-comment-btn').onclick = cancelComment;
-  $('#submit-comment-btn').onclick = submitComment;
-
-  // Share modal
-  $('#close-share-modal').onclick = () => { $('#share-modal').style.display = 'none'; };
-  $('#share-modal').onclick = e => { if (e.target === $('#share-modal')) $('#share-modal').style.display = 'none'; };
-  $('#create-share-btn').onclick = createShare;
-
-  // Slash menu
-  document.addEventListener('click', e => {
-    if (slashState && !$('#slash-menu').contains(e.target)) hideSlashMenu();
-  });
-
-  // Image upload
-  $('#image-upload').onchange = handleImageUpload;
+	// Build tree
+	var roots = allPages.filter(function(p) { return !p.parent_id; });
+	roots.forEach(function(p) { tree.appendChild(createPageNode(p)); });
 }
 
-function doLogin() {
-  const key = $('#login-key').value.trim();
-  if (!key) return;
-  adminKey = key;
-  localStorage.setItem('admin_key', key);
-  showApp();
+function createPageNode(page) {
+	var frag = document.createDocumentFragment();
+	var item = createPageItem(page);
+	frag.appendChild(item);
+
+	var children = allPages.filter(function(p) { return p.parent_id === page.id; });
+	if (children.length > 0) {
+		var childrenDiv = document.createElement('div');
+		childrenDiv.className = 'page-children';
+		if (!expandedPages[page.id]) childrenDiv.classList.add('collapsed');
+		children.forEach(function(c) { childrenDiv.appendChild(createPageNode(c)); });
+		frag.appendChild(childrenDiv);
+	}
+
+	return frag;
 }
 
-// --- Pages ---
-async function loadPages() {
-  const pages = await api('GET', '/api/pages');
-  if (!pages) return;
-  renderPageList(pages);
+function createPageItem(page) {
+	var div = document.createElement('div');
+	div.className = 'page-item' + (page.id === currentPageId ? ' active' : '');
+	div.dataset.pageId = page.id;
+	div.draggable = true;
+
+	var children = allPages.filter(function(p) { return p.parent_id === page.id; });
+	var hasChildren = children.length > 0;
+
+	// Toggle
+	var toggle = document.createElement('span');
+	toggle.className = 'page-toggle';
+	if (hasChildren) {
+		toggle.textContent = expandedPages[page.id] ? '▼' : '▶';
+		toggle.addEventListener('click', function(e) {
+			e.stopPropagation();
+			togglePageExpand(page.id);
+		});
+	}
+	div.appendChild(toggle);
+
+	// Icon
+	var icon = document.createElement('span');
+	icon.className = 'page-icon';
+	icon.textContent = page.icon || '📄';
+	div.appendChild(icon);
+
+	// Title
+	var title = document.createElement('span');
+	title.className = 'page-title';
+	title.textContent = page.title;
+	div.appendChild(title);
+
+	// Add child button
+	var addBtn = document.createElement('span');
+	addBtn.className = 'page-add-child';
+	addBtn.textContent = '+';
+	addBtn.addEventListener('click', function(e) {
+		e.stopPropagation();
+		createNewPage(page.id);
+	});
+	div.appendChild(addBtn);
+
+	div.addEventListener('click', function() { selectPage(page.id); });
+
+	// Page drag
+	div.addEventListener('dragstart', function(e) {
+		e.stopPropagation();
+		draggedPageId = page.id;
+		e.dataTransfer.effectAllowed = 'move';
+		div.style.opacity = '0.4';
+	});
+	div.addEventListener('dragend', function() {
+		draggedPageId = null;
+		div.style.opacity = '';
+		clearPageDragStyles();
+	});
+	div.addEventListener('dragover', function(e) {
+		if (!draggedPageId || draggedPageId === page.id) return;
+		e.preventDefault();
+		e.dataTransfer.dropEffect = 'move';
+		var rect = div.getBoundingClientRect();
+		var y = e.clientY - rect.top;
+		var third = rect.height / 3;
+		div.classList.remove('drag-over-top', 'drag-over-middle', 'drag-over-bottom');
+		if (y < third) div.classList.add('drag-over-top');
+		else if (y > third * 2) div.classList.add('drag-over-bottom');
+		else div.classList.add('drag-over-middle');
+	});
+	div.addEventListener('dragleave', function() {
+		div.classList.remove('drag-over-top', 'drag-over-middle', 'drag-over-bottom');
+	});
+	div.addEventListener('drop', function(e) {
+		e.preventDefault();
+		if (!draggedPageId || draggedPageId === page.id) return;
+		var rect = div.getBoundingClientRect();
+		var y = e.clientY - rect.top;
+		var third = rect.height / 3;
+		var parentId, position;
+		if (y < third) {
+			// Above: same parent, same position
+			parentId = page.parent_id;
+			position = page.position;
+		} else if (y > third * 2) {
+			// Below: same parent, position + 1
+			parentId = page.parent_id;
+			position = page.position + 1;
+		} else {
+			// Child
+			parentId = page.id;
+			position = 0;
+			expandedPages[page.id] = true;
+			localStorage.setItem('expanded_pages', JSON.stringify(expandedPages));
+		}
+		api('PUT', '/api/pages/' + draggedPageId + '/move', { parent_id: parentId || null, position: position })
+			.then(loadPages);
+		clearPageDragStyles();
+	});
+
+	return div;
 }
 
-function renderPageList(pages) {
-  const list = $('#page-list');
-  list.innerHTML = '';
-  pages.forEach(p => {
-    const div = document.createElement('div');
-    div.className = 'page-item' + (p.id === currentPageId ? ' active' : '');
-    div.innerHTML = `<span class="page-item-icon">${p.icon || '📄'}</span>${escHtml(p.title)}`;
-    div.onclick = () => selectPage(p.id);
-    list.appendChild(div);
-  });
+function clearPageDragStyles() {
+	document.querySelectorAll('.page-item').forEach(function(el) {
+		el.classList.remove('drag-over-top', 'drag-over-middle', 'drag-over-bottom');
+	});
 }
 
-async function selectPage(id) {
-  if (autoSaveTimer) { clearTimeout(autoSaveTimer); await saveAll(); }
-  currentPageId = id;
-  const data = await api('GET', `/api/pages/${id}`);
-  if (!data) return;
-  renderEditor(data.page, data.blocks);
-  loadPages(); // refresh sidebar active state
+function togglePageExpand(id) {
+	expandedPages[id] = !expandedPages[id];
+	localStorage.setItem('expanded_pages', JSON.stringify(expandedPages));
+	renderPageTree();
 }
 
-function renderEditor(page, blocks) {
-  $('#empty-state').style.display = 'none';
-  $('#page-editor').style.display = 'flex';
-  $('#page-title').value = page.title;
-  $('#icon-btn').textContent = page.icon || '📄';
-  renderBlocks(blocks);
+function selectPage(id) {
+	currentPageId = id;
+	localStorage.setItem('last_page_id', id);
+	document.getElementById('empty-state').style.display = 'none';
+	document.getElementById('page-editor').style.display = 'block';
+	// Close panels
+	document.getElementById('comments-panel').style.display = 'none';
+	document.getElementById('shares-panel').style.display = 'none';
+
+	Promise.all([
+		api('GET', '/api/pages'),
+		api('GET', '/api/pages/' + id + '/blocks'),
+		api('GET', '/api/pages/' + id + '/comments')
+	]).then(function(results) {
+		allPages = results[0];
+		currentPage = allPages.find(function(p) { return p.id === id; });
+		if (!currentPage) return;
+		renderPageTree();
+
+		document.getElementById('page-title').value = currentPage.title;
+		document.getElementById('page-icon-btn').textContent = currentPage.icon || '📄';
+
+		allComments = results[2];
+		renderBlocks(results[1]);
+		renderComments();
+		// Auto-open comments panel if page has comments
+		if (allComments.length > 0) {
+			document.getElementById('comments-panel').style.display = 'block';
+		}
+	});
 }
 
-async function createPage() {
-  const page = await api('POST', '/api/pages', { title: '', icon: '' });
-  if (!page) return;
-  await loadPages();
-  selectPage(page.id);
+function createNewPage(parentId) {
+	var body = { title: 'Untitled' };
+	if (parentId) {
+		body.parent_id = parentId;
+		expandedPages[parentId] = true;
+		localStorage.setItem('expanded_pages', JSON.stringify(expandedPages));
+	}
+	api('POST', '/api/pages', body).then(function(page) {
+		loadPages().then(function() {
+			selectPage(page.id);
+			setTimeout(function() {
+				var titleEl = document.getElementById('page-title');
+				titleEl.focus();
+				titleEl.select();
+			}, 100);
+		});
+	});
 }
 
-async function deletePage() {
-  if (!currentPageId) return;
-  if (!confirm('Delete this page?')) return;
-  await api('DELETE', `/api/pages/${currentPageId}`);
-  currentPageId = null;
-  $('#page-editor').style.display = 'none';
-  $('#empty-state').style.display = 'flex';
-  $('#comments-sidebar').style.display = 'none';
-  loadPages();
+function deletePage() {
+	if (!currentPageId) return;
+	if (!confirm('Delete this page and all its children?')) return;
+	api('DELETE', '/api/pages/' + currentPageId).then(function() {
+		currentPageId = null;
+		currentPage = null;
+		document.getElementById('page-editor').style.display = 'none';
+		document.getElementById('empty-state').style.display = 'flex';
+		loadPages();
+	});
 }
 
-function pickIcon() {
-  const icons = ['📄','📘','📋','🎨','📝','📊','🚀','💡','🔧','📦','🎯','🏠','⭐','📌','🔑','🗂'];
-  const icon = prompt('Pick an icon:\n' + icons.join(' '), $('#icon-btn').textContent);
-  if (icon !== null) {
-    $('#icon-btn').textContent = icon || '📄';
-    scheduleAutoSave();
-  }
+function handlePageSearch() {
+	renderPageTree();
 }
 
-// --- Block Rendering ---
+// ---- Blocks ----
 function renderBlocks(blocks) {
-  const container = $('#blocks-container');
-  container.innerHTML = '';
-  if (!blocks || blocks.length === 0) {
-    const el = createBlockEl({ id: tempId(), type: 'paragraph', content: '', properties: '{}' });
-    container.appendChild(el);
-    return;
-  }
-  blocks.forEach(b => {
-    const el = createBlockEl(b);
-    container.appendChild(el);
-  });
+	var container = document.getElementById('blocks-container');
+	container.innerHTML = '';
+
+	if (!blocks || blocks.length === 0) {
+		var wrapper = createBlockEl({ id: generateId(), type: 'paragraph', content: '', properties: {} });
+		container.appendChild(wrapper);
+		ensureBR(wrapper.querySelector('.block-content'));
+		return;
+	}
+
+	// Build parent map for depth calculation
+	var blockMap = {};
+	blocks.forEach(function(b) { blockMap[b.id] = b; });
+
+	blocks.forEach(function(block) {
+		var wrapper = createBlockEl(block);
+		// Calculate depth
+		var depth = getBlockDepth(block.parent_block_id, blockMap);
+		if (depth > 0) wrapper.dataset.depth = depth;
+		container.appendChild(wrapper);
+	});
+
+	updateNumberedLists();
+	highlightCodeBlocks();
+	renderMathBlocks();
+	applyCommentHighlights();
 }
 
-function tempId() {
-  return 'tmp_' + Math.random().toString(36).substr(2, 12);
+function getBlockDepth(parentId, blockMap) {
+	var depth = 0;
+	var seen = {};
+	while (parentId && blockMap[parentId] && !seen[parentId]) {
+		seen[parentId] = true;
+		depth++;
+		parentId = blockMap[parentId].parent_block_id;
+	}
+	return depth;
 }
 
 function createBlockEl(block) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'block-wrapper';
-  if (block.parent_block_id) {
-    wrapper.className += ' toggle-child';
-    wrapper.dataset.parent = block.parent_block_id;
-    // Check if parent toggle is collapsed
-    const parentEl = $(`[data-block-id="${block.parent_block_id}"]`);
-    if (parentEl) {
-      const arrow = $('.toggle-arrow', parentEl);
-      if (arrow && !arrow.classList.contains('expanded')) {
-        wrapper.classList.add('collapsed');
-      }
-    }
-  }
-  wrapper.dataset.blockId = block.id;
-  wrapper.dataset.type = block.type;
+	var wrapper = document.createElement('div');
+	wrapper.className = 'block-wrapper';
+	wrapper.dataset.blockId = block.id;
+	wrapper.dataset.type = block.type;
+	if (block.parent_block_id) wrapper.dataset.parentBlockId = block.parent_block_id;
 
-  // Handle
-  const handle = document.createElement('div');
-  handle.className = 'block-handle';
-  handle.contentEditable = 'false';
-  handle.draggable = true;
-  handle.innerHTML = '<svg viewBox="0 0 10 20"><circle cx="3" cy="4" r="1.2"/><circle cx="7" cy="4" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="16" r="1.2"/><circle cx="7" cy="16" r="1.2"/></svg>';
-  wrapper.appendChild(handle);
+	var props = typeof block.properties === 'string' ? JSON.parse(block.properties || '{}') : (block.properties || {});
 
-  const type = block.type;
-  let props = {};
-  try { props = JSON.parse(block.properties || '{}'); } catch(e) {}
+	// Handle
+	var handle = document.createElement('div');
+	handle.className = 'block-handle';
+	handle.contentEditable = 'false';
+	handle.draggable = true;
+	handle.textContent = '⋮⋮';
+	wrapper.appendChild(handle);
 
-  if (type === 'divider') {
-    wrapper.contentEditable = 'false';
-    const hr = document.createElement('hr');
-    hr.className = 'divider-line';
-    wrapper.appendChild(hr);
-    return wrapper;
-  }
+	// Type-specific prefix elements
+	if (block.type === 'todo') {
+		var cb = document.createElement('input');
+		cb.type = 'checkbox';
+		cb.className = 'todo-checkbox';
+		cb.contentEditable = 'false';
+		cb.checked = !!(props.checked);
+		if (cb.checked) wrapper.classList.add('checked');
+		cb.addEventListener('change', function() {
+			wrapper.classList.toggle('checked', cb.checked);
+			scheduleAutoSave();
+		});
+		wrapper.appendChild(cb);
+	}
 
-  if (type === 'image') {
-    const content = document.createElement('div');
-    content.className = 'block-content';
-    content.contentEditable = 'false';
-    const img = document.createElement('img');
-    img.src = props.src || '';
-    img.alt = block.content || '';
-    content.appendChild(img);
-    wrapper.appendChild(content);
-    return wrapper;
-  }
+	if (block.type === 'toggle') {
+		var toggleIcon = document.createElement('span');
+		toggleIcon.className = 'toggle-icon';
+		toggleIcon.contentEditable = 'false';
+		toggleIcon.textContent = '▶';
+		toggleIcon.addEventListener('click', function() {
+			toggleIcon.classList.toggle('open');
+			var isOpen = toggleIcon.classList.contains('open');
+			var container = document.getElementById('blocks-container');
+			var allWrappers = Array.from(container.querySelectorAll('.block-wrapper'));
+			var myId = wrapper.dataset.blockId;
+			var children = allWrappers.filter(function(w) { return w.dataset.parentBlockId === myId; });
+			if (isOpen && children.length === 0) {
+				// Create empty child block when expanding empty toggle
+				var parentDepth = parseInt(wrapper.dataset.depth || '0', 10);
+				var childBlock = insertBlockAfter(wrapper, 'paragraph', '');
+				childBlock.dataset.parentBlockId = myId;
+				childBlock.dataset.depth = parentDepth + 1;
+				setCursorToBlock(childBlock, false);
+				scheduleAutoSave();
+			} else {
+				children.forEach(function(w) {
+					w.style.display = isOpen ? '' : 'none';
+				});
+			}
+		});
+		wrapper.appendChild(toggleIcon);
+	}
 
-  // Types with row layout: bullet, numbered, todo, toggle
-  if (type === 'bullet_list' || type === 'numbered_list' || type === 'todo' || type === 'toggle') {
-    const row = document.createElement('div');
-    row.className = 'block-row';
+	if (block.type === 'numbered_list') {
+		var numSpan = document.createElement('span');
+		numSpan.className = 'list-number';
+		numSpan.contentEditable = 'false';
+		numSpan.textContent = '1.';
+		wrapper.appendChild(numSpan);
+	}
 
-    if (type === 'bullet_list') {
-      const marker = document.createElement('span');
-      marker.className = 'list-marker';
-      marker.contentEditable = 'false';
-      marker.textContent = '•';
-      row.appendChild(marker);
-    } else if (type === 'numbered_list') {
-      const marker = document.createElement('span');
-      marker.className = 'list-marker';
-      marker.contentEditable = 'false';
-      marker.textContent = '1.';
-      row.appendChild(marker);
-    } else if (type === 'todo') {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.className = 'todo-checkbox';
-      cb.contentEditable = 'false';
-      cb.checked = !!props.checked;
-      if (props.checked) wrapper.classList.add('checked');
-      cb.onchange = () => {
-        wrapper.classList.toggle('checked', cb.checked);
-        scheduleAutoSave();
-      };
-      row.appendChild(cb);
-    } else if (type === 'toggle') {
-      const arrow = document.createElement('span');
-      arrow.className = 'toggle-arrow expanded';
-      arrow.contentEditable = 'false';
-      arrow.textContent = '▶';
-      arrow.onclick = () => toggleToggle(wrapper);
-      row.appendChild(arrow);
-    }
+	// Content
+	if (block.type === 'divider') {
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.contentEditable = 'false';
+		content.innerHTML = '<hr>';
+		wrapper.appendChild(content);
+	} else if (block.type === 'code') {
+		var codeWrapper = document.createElement('div');
+		codeWrapper.className = 'block-content code-block-wrapper';
+		codeWrapper.contentEditable = 'false';
 
-    const content = document.createElement('div');
-    content.className = 'block-content';
-    content.innerHTML = block.content || '';
-    setPlaceholder(content, type);
-    row.appendChild(content);
-    wrapper.appendChild(row);
-    return wrapper;
-  }
+		var langSelect = createCodeLangSelect(props.language || '');
+		codeWrapper.appendChild(langSelect);
 
-  // Simple block types: paragraph, heading, quote, code, callout
-  const content = document.createElement('div');
-  content.className = 'block-content';
-  content.innerHTML = block.content || '';
-  setPlaceholder(content, type);
-  wrapper.appendChild(content);
-  return wrapper;
+		var pre = document.createElement('pre');
+		var code = document.createElement('code');
+		code.contentEditable = 'true';
+		code.textContent = block.content || '';
+		code.addEventListener('input', function() { scheduleAutoSave(); });
+		code.addEventListener('keydown', function(e) {
+			if (e.key === 'Tab') {
+				e.preventDefault();
+				document.execCommand('insertText', false, '  ');
+			}
+		});
+		pre.appendChild(code);
+		codeWrapper.appendChild(pre);
+		wrapper.appendChild(codeWrapper);
+	} else if (block.type === 'image') {
+		var imgDiv = document.createElement('div');
+		imgDiv.className = 'block-content image-block';
+		imgDiv.contentEditable = 'false';
+		if (props.src) {
+			var img = document.createElement('img');
+			img.src = props.src;
+			imgDiv.appendChild(img);
+		} else {
+			var placeholder = document.createElement('div');
+			placeholder.className = 'image-upload-placeholder';
+			placeholder.textContent = 'Click to upload image';
+			placeholder.addEventListener('click', function() { uploadImage(wrapper); });
+			imgDiv.appendChild(placeholder);
+		}
+		wrapper.appendChild(imgDiv);
+	} else if (block.type === 'file') {
+		var fileDiv = document.createElement('div');
+		fileDiv.className = 'block-content file-block';
+		fileDiv.contentEditable = 'false';
+		if (props.src) {
+			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(props.src) + '" download="' + escapeHtml(props.filename || '') + '">' + escapeHtml(props.filename || block.content || 'Download') + '</a>';
+		} else {
+			var uploadBtn = document.createElement('div');
+			uploadBtn.className = 'image-upload-placeholder';
+			uploadBtn.textContent = 'Click to upload file';
+			uploadBtn.addEventListener('click', function() { uploadFile(wrapper); });
+			fileDiv.appendChild(uploadBtn);
+		}
+		wrapper.appendChild(fileDiv);
+	} else if (block.type === 'page_link') {
+		var linkDiv = document.createElement('div');
+		linkDiv.className = 'block-content page-link-block';
+		linkDiv.contentEditable = 'false';
+		var pageId = props.page_id;
+		var linkedPage = allPages.find(function(p) { return p.id === pageId; });
+		linkDiv.textContent = '📄 ' + (linkedPage ? linkedPage.title : block.content || 'Unknown page');
+		linkDiv.dataset.pageId = pageId;
+		linkDiv.addEventListener('click', function() {
+			if (pageId) selectPage(pageId);
+		});
+		wrapper.appendChild(linkDiv);
+	} else if (block.type === 'table') {
+		var tableDiv = document.createElement('div');
+		tableDiv.className = 'block-content table-wrapper';
+		tableDiv.contentEditable = 'false';
+		var rows = props.rows || [['', ''], ['', '']];
+		tableDiv.appendChild(createTableElement(rows));
+		tableDiv.appendChild(createTableControls(tableDiv));
+		wrapper.appendChild(tableDiv);
+	} else if (block.type === 'math') {
+		var mathDiv = document.createElement('div');
+		mathDiv.className = 'block-content math-block';
+		mathDiv.contentEditable = 'false';
+
+		var preview = document.createElement('div');
+		preview.className = 'math-preview';
+		preview.addEventListener('click', function() {
+			mathDiv.classList.add('editing');
+			mathInput.focus();
+		});
+		mathDiv.appendChild(preview);
+
+		var mathInput = document.createElement('div');
+		mathInput.className = 'math-input';
+		mathInput.contentEditable = 'true';
+		mathInput.textContent = block.content || '';
+		mathInput.addEventListener('blur', function() {
+			mathDiv.classList.remove('editing');
+			renderSingleMath(mathDiv);
+			scheduleAutoSave();
+		});
+		mathInput.addEventListener('input', function() { scheduleAutoSave(); });
+		mathInput.addEventListener('keydown', function(e) {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				mathInput.blur();
+			}
+		});
+		mathDiv.appendChild(mathInput);
+		wrapper.appendChild(mathDiv);
+	} else {
+		// paragraph, heading1-3, bullet_list, quote, callout
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.innerHTML = block.content || '<br>';
+		wrapper.appendChild(content);
+		ensureBR(content);
+	}
+
+	return wrapper;
 }
 
-function setPlaceholder(el, type) {
-  const placeholders = {
-    paragraph: "Type '/' for commands...",
-    heading1: 'Heading 1',
-    heading2: 'Heading 2',
-    heading3: 'Heading 3',
-    quote: 'Quote',
-    code: 'Code',
-    callout: 'Callout',
-    bullet_list: 'List item',
-    numbered_list: 'List item',
-    todo: 'To-do',
-    toggle: 'Toggle',
-  };
-  if (placeholders[type]) el.setAttribute('data-placeholder', placeholders[type]);
+function createCodeLangSelect(language) {
+	var select = document.createElement('select');
+	select.className = 'code-language';
+	select.contentEditable = 'false';
+	var langs = ['', 'json', 'bash', 'html', 'css', 'go', 'solidity', 'rust', 'c', 'cpp', 'toml', 'ruby', 'python', 'typescript', 'javascript', 'java', 'csharp', 'sql', 'yaml', 'xml', 'markdown', 'php', 'swift', 'kotlin', 'lua', 'perl', 'r', 'scala', 'haskell', 'elixir', 'erlang', 'clojure', 'dart', 'groovy', 'powershell', 'dockerfile', 'makefile', 'graphql', 'protobuf', 'ini', 'nginx', 'diff'];
+	langs.forEach(function(l) {
+		var opt = document.createElement('option');
+		opt.value = l;
+		opt.textContent = l || 'auto';
+		if (l === language) opt.selected = true;
+		select.appendChild(opt);
+	});
+	select.addEventListener('change', function() {
+		scheduleAutoSave();
+		highlightCodeBlocks();
+	});
+	return select;
 }
 
-function toggleToggle(wrapperEl) {
-  const arrow = $('.toggle-arrow', wrapperEl);
-  const blockId = wrapperEl.dataset.blockId;
-  const expanded = arrow.classList.toggle('expanded');
-  $$(`[data-parent="${blockId}"]`).forEach(child => {
-    child.classList.toggle('collapsed', !expanded);
-  });
+function createTableElement(rows) {
+	var table = document.createElement('table');
+	rows.forEach(function(row, ri) {
+		var tr = document.createElement('tr');
+		row.forEach(function(cell) {
+			var td = document.createElement(ri === 0 ? 'th' : 'td');
+			td.contentEditable = 'true';
+			td.textContent = cell;
+			td.addEventListener('input', function() { scheduleAutoSave(); });
+			tr.appendChild(td);
+		});
+		table.appendChild(tr);
+	});
+	return table;
 }
 
-function renumberLists() {
-  const wrappers = $$('#blocks-container > .block-wrapper');
-  let num = 0;
-  wrappers.forEach(w => {
-    if (w.dataset.type === 'numbered_list' && !w.dataset.parent) {
-      num++;
-      const marker = $('.list-marker', w);
-      if (marker) marker.textContent = num + '.';
-    } else if (w.dataset.type !== 'numbered_list') {
-      num = 0;
-    }
-  });
+function createTableControls(tableDiv) {
+	var controls = document.createElement('div');
+	controls.className = 'table-controls';
+
+	var addRow = document.createElement('button');
+	addRow.textContent = '+ Row';
+	addRow.addEventListener('click', function() {
+		var table = tableDiv.querySelector('table');
+		var cols = table.rows[0] ? table.rows[0].cells.length : 2;
+		var tr = document.createElement('tr');
+		for (var i = 0; i < cols; i++) {
+			var td = document.createElement('td');
+			td.contentEditable = 'true';
+			td.addEventListener('input', function() { scheduleAutoSave(); });
+			tr.appendChild(td);
+		}
+		table.appendChild(tr);
+		scheduleAutoSave();
+	});
+
+	var addCol = document.createElement('button');
+	addCol.textContent = '+ Column';
+	addCol.addEventListener('click', function() {
+		var table = tableDiv.querySelector('table');
+		Array.from(table.rows).forEach(function(tr, ri) {
+			var td = document.createElement(ri === 0 ? 'th' : 'td');
+			td.contentEditable = 'true';
+			td.addEventListener('input', function() { scheduleAutoSave(); });
+			tr.appendChild(td);
+		});
+		scheduleAutoSave();
+	});
+
+	var delRow = document.createElement('button');
+	delRow.textContent = '- Row';
+	delRow.addEventListener('click', function() {
+		var table = tableDiv.querySelector('table');
+		if (table.rows.length > 1) {
+			table.deleteRow(table.rows.length - 1);
+			scheduleAutoSave();
+		}
+	});
+
+	var delCol = document.createElement('button');
+	delCol.textContent = '- Column';
+	delCol.addEventListener('click', function() {
+		var table = tableDiv.querySelector('table');
+		if (table.rows[0] && table.rows[0].cells.length > 1) {
+			Array.from(table.rows).forEach(function(tr) {
+				tr.deleteCell(tr.cells.length - 1);
+			});
+			scheduleAutoSave();
+		}
+	});
+
+	controls.appendChild(addRow);
+	controls.appendChild(addCol);
+	controls.appendChild(delRow);
+	controls.appendChild(delCol);
+	return controls;
 }
 
-// --- Block Data Extraction ---
-function getBlocksData() {
-  const blocks = [];
-  const wrappers = $$('#blocks-container > .block-wrapper');
-
-  // Calculate positions
-  let topPos = 0;
-  const childPos = {};
-
-  wrappers.forEach(w => {
-    const type = w.dataset.type;
-    const parentId = w.dataset.parent || '';
-    let content = '';
-    let props = '{}';
-
-    if (type === 'divider') {
-      content = '';
-    } else if (type === 'image') {
-      const img = $('img', w);
-      content = img ? img.alt : '';
-      props = JSON.stringify({ src: img ? img.getAttribute('src') : '' });
-    } else if (type === 'todo') {
-      const cb = $('.todo-checkbox', w);
-      content = $('.block-content', w)?.innerHTML || '';
-      props = JSON.stringify({ checked: cb ? cb.checked : false });
-    } else {
-      content = $('.block-content', w)?.innerHTML || '';
-    }
-
-    let position;
-    if (!parentId) {
-      position = topPos++;
-    } else {
-      if (!(parentId in childPos)) childPos[parentId] = 0;
-      position = childPos[parentId]++;
-    }
-
-    blocks.push({
-      client_id: w.dataset.blockId,
-      type,
-      content,
-      properties: props,
-      position,
-      parent_client_id: parentId,
-    });
-  });
-
-  return blocks;
+// ---- Block helpers ----
+function ensureBR(el) {
+	if (!el) return;
+	if (el.textContent.trim() === '' && !el.querySelector('img') && !el.querySelector('br')) {
+		el.innerHTML = '<br>';
+	}
+	el.classList.toggle('is-empty', el.textContent.trim() === '');
 }
 
-// --- Save ---
-function scheduleAutoSave() {
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer = setTimeout(() => saveAll(), 1000);
+function cleanContent(html) {
+	if (!html) return '';
+	var cleaned = html.replace(/^<br\s*\/?>$/, '');
+	cleaned = cleaned.replace(/<br\s*\/?>$/, '');
+	return cleaned.trim();
 }
 
-async function saveAll() {
-  if (!currentPageId) return;
-  autoSaveTimer = null;
-
-  const title = $('#page-title').value;
-  const icon = $('#icon-btn').textContent;
-
-  await Promise.all([
-    api('PUT', `/api/pages/${currentPageId}`, { title, icon, cover_image: '' }),
-    api('PUT', `/api/pages/${currentPageId}/blocks`, { blocks: getBlocksData() }),
-  ]);
-
-  renumberLists();
-  loadPages();
+function getBlockWrapper(node) {
+	while (node && node !== document.getElementById('blocks-container')) {
+		if (node.classList && node.classList.contains('block-wrapper')) return node;
+		node = node.parentNode;
+	}
+	return null;
 }
 
-// --- Input Handling ---
+function getCurrentBlockWrapper() {
+	var sel = window.getSelection();
+	if (!sel.anchorNode) return null;
+	return getBlockWrapper(sel.anchorNode);
+}
+
+function getBlockContent(wrapper) {
+	if (!wrapper) return null;
+	return wrapper.querySelector('.block-content');
+}
+
+function generateId() {
+	return 'b_' + Math.random().toString(36).substr(2, 12);
+}
+
+function escapeHtml(str) {
+	var div = document.createElement('div');
+	div.textContent = str;
+	return div.innerHTML;
+}
+
+// ---- Cursor management ----
+function setCursorToBlock(wrapper, atEnd) {
+	var container = document.getElementById('blocks-container');
+	container.focus();
+
+	requestAnimationFrame(function() {
+		var content = wrapper.querySelector('.block-content');
+		if (!content) return;
+
+		var sel = window.getSelection();
+		var range = document.createRange();
+
+		if (atEnd && content.childNodes.length > 0) {
+			var lastChild = content.childNodes[content.childNodes.length - 1];
+			if (lastChild.nodeName === 'BR') {
+				if (content.childNodes.length > 1) {
+					lastChild = content.childNodes[content.childNodes.length - 2];
+					if (lastChild.nodeType === 3) {
+						range.setStart(lastChild, lastChild.textContent.length);
+					} else {
+						range.setStartAfter(lastChild);
+					}
+				} else {
+					range.setStart(content, 0);
+				}
+			} else if (lastChild.nodeType === 3) {
+				range.setStart(lastChild, lastChild.textContent.length);
+			} else {
+				range.setStartAfter(lastChild);
+			}
+		} else {
+			range.setStart(content, 0);
+		}
+		range.collapse(true);
+		sel.removeAllRanges();
+		sel.addRange(range);
+	});
+}
+
+var lastCursorBlockId = null;
+function updateCursorBlock() {
+	var allWrappers = document.querySelectorAll('#blocks-container .block-wrapper');
+	allWrappers.forEach(function(w) { w.classList.remove('has-cursor'); });
+
+	var wrapper = getCurrentBlockWrapper();
+	var newBlockId = wrapper ? wrapper.dataset.blockId : null;
+	if (wrapper) {
+		wrapper.classList.add('has-cursor');
+		var content = getBlockContent(wrapper);
+		if (content) ensureBR(content);
+	}
+	// Re-highlight code blocks when cursor leaves a code block
+	if (lastCursorBlockId !== newBlockId) {
+		lastCursorBlockId = newBlockId;
+		highlightCodeBlocks();
+	}
+}
+
+// ---- Input handling ----
 function handleInput(e) {
-  const block = getCurrentBlock();
-  if (!block) return;
+	var wrapper = getCurrentBlockWrapper();
+	if (!wrapper) return;
+	var type = wrapper.dataset.type;
+	var content = getBlockContent(wrapper);
 
-  // Check markdown shortcuts
-  if (block.dataset.type === 'paragraph') {
-    const contentEl = $('.block-content', block);
-    if (contentEl) {
-      const text = contentEl.textContent.replace(/\u00a0/g, ' ');
-      if (checkMarkdownShortcut(block, contentEl, text)) return;
-    }
-  }
+	if (content) ensureBR(content);
 
-  // Check slash command
-  if (slashState) {
-    updateSlashFilter();
-  } else {
-    const contentEl = $('.block-content', getCurrentBlock());
-    if (contentEl) {
-      const text = contentEl.textContent;
-      const match = text.match(/(?:^|\s)\/([a-z0-9]*)$/i);
-      if (match) {
-        const offset = text.lastIndexOf('/');
-        slashState = { blockEl: getCurrentBlock(), slashOffset: offset };
-        slashActiveIndex = 0;
-        showSlashMenu();
-        updateSlashFilter();
-      }
-    }
-  }
+	// Check for markdown shortcuts
+	if (type === 'paragraph' && content) {
+		var text = content.textContent.replace(/\u00a0/g, ' ');
 
-  scheduleAutoSave();
-}
+		var shortcuts = [
+			{ pattern: /^# $/, type: 'heading1' },
+			{ pattern: /^## $/, type: 'heading2' },
+			{ pattern: /^### $/, type: 'heading3' },
+			{ pattern: /^[-*] $/, type: 'bullet_list' },
+			{ pattern: /^1\. $/, type: 'numbered_list' },
+			{ pattern: /^> $/, type: 'quote' },
+			{ pattern: /^\[\] $/, type: 'todo', checked: false },
+			{ pattern: /^\[ \] $/, type: 'todo', checked: false },
+			{ pattern: /^\[x\] $/, type: 'todo', checked: true },
+		];
 
-function checkMarkdownShortcut(block, contentEl, text) {
-  const shortcuts = [
-    { re: /^# $/, type: 'heading1' },
-    { re: /^## $/, type: 'heading2' },
-    { re: /^### $/, type: 'heading3' },
-    { re: /^- $/, type: 'bullet_list' },
-    { re: /^\* $/, type: 'bullet_list' },
-    { re: /^1\. $/, type: 'numbered_list' },
-    { re: /^\[\] $/, type: 'todo' },
-    { re: /^\[ \] $/, type: 'todo' },
-    { re: /^> $/, type: 'quote' },
-    { re: /^```$/, type: 'code' },
-    { re: /^---$/, type: 'divider' },
-  ];
+		for (var i = 0; i < shortcuts.length; i++) {
+			if (shortcuts[i].pattern.test(text)) {
+				content.innerHTML = '<br>';
+				rebuildBlock(wrapper, shortcuts[i].type, shortcuts[i].checked);
+				scheduleAutoSave();
+				return;
+			}
+		}
 
-  for (const s of shortcuts) {
-    if (s.re.test(text)) {
-      convertBlock(block, s.type);
-      if (s.type !== 'divider') {
-        const newContent = $('.block-content', block);
-        if (newContent) {
-          newContent.innerHTML = '';
-          setCursorToBlock(block, true);
-        }
-      }
-      scheduleAutoSave();
-      return true;
-    }
-  }
-  return false;
+		// Divider shortcut
+		if (/^---$/.test(text.trim())) {
+			content.innerHTML = '<hr>';
+			rebuildBlock(wrapper, 'divider');
+			scheduleAutoSave();
+			return;
+		}
+
+		// Code block shortcut
+		if (/^```$/.test(text.trim())) {
+			content.innerHTML = '';
+			rebuildBlock(wrapper, 'code');
+			scheduleAutoSave();
+			return;
+		}
+
+		// Math shortcut
+		if (/^\$\$$/.test(text.trim())) {
+			content.innerHTML = '';
+			rebuildBlock(wrapper, 'math');
+			scheduleAutoSave();
+			return;
+		}
+	}
+
+	// Slash command
+	if (content) {
+		var text = content.textContent.replace(/\u00a0/g, ' ');
+		if (text.startsWith('/')) {
+			slashQuery = text.substring(1);
+			slashBlockId = wrapper.dataset.blockId;
+			showSlashMenu();
+			return;
+		}
+	}
+	hideSlashMenu();
+	scheduleAutoSave();
+
+	// Live syntax highlighting for code blocks
+	if (type === 'code') {
+		highlightCodeBlocks();
+	}
 }
 
 function handleKeyDown(e) {
-  // Slash menu navigation
-  if (slashState) {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      slashActiveIndex = Math.min(slashActiveIndex + 1, filteredSlashItems.length - 1);
-      renderSlashItems();
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      slashActiveIndex = Math.max(slashActiveIndex - 1, 0);
-      renderSlashItems();
-      return;
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      if (filteredSlashItems.length > 0) {
-        executeSlashCommand(filteredSlashItems[slashActiveIndex].type);
-      }
-      hideSlashMenu();
-      return;
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      hideSlashMenu();
-      return;
-    }
-  }
+	// Formatting shortcuts
+	if (e.ctrlKey || e.metaKey) {
+		if (e.key === 'b') {
+			e.preventDefault();
+			document.execCommand('bold');
+			return;
+		}
+		if (e.key === 'i') {
+			e.preventDefault();
+			document.execCommand('italic');
+			return;
+		}
+		if (e.key === 'e') {
+			e.preventDefault();
+			toggleInlineCode();
+			return;
+		}
+		if (e.key === 'X' && e.shiftKey) {
+			e.preventDefault();
+			document.execCommand('strikeThrough');
+			return;
+		}
+	}
 
-  if (e.key === 'Enter' && !e.shiftKey) {
-    handleEnter(e);
-    return;
-  }
+	var wrapper = getCurrentBlockWrapper();
+	if (!wrapper) return;
+	var type = wrapper.dataset.type;
 
-  if (e.key === 'Backspace') {
-    handleBackspace(e);
-    return;
-  }
+	// Slash menu navigation
+	var slash = document.getElementById('slash-menu');
+	if (slash.style.display !== 'none') {
+		if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+			e.preventDefault();
+			navigateSlashMenu(e.key === 'ArrowDown' ? 1 : -1);
+			return;
+		}
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			selectSlashItem();
+			return;
+		}
+	}
 
-  if (e.key === 'Tab') {
-    const block = getCurrentBlock();
-    if (block && block.dataset.type === 'code') {
-      e.preventDefault();
-      document.execCommand('insertText', false, '  ');
-    }
-    return;
-  }
+	// Enter key
+	if (e.key === 'Enter' && !e.shiftKey) {
+		if (type === 'code' || type === 'math') return; // Let default handle it in code/math
+		if (type === 'divider' || type === 'image' || type === 'file' || type === 'page_link' || type === 'table') {
+			e.preventDefault();
+			insertBlockAfter(wrapper, 'paragraph', '');
+			return;
+		}
+
+		e.preventDefault();
+		var content = getBlockContent(wrapper);
+		if (!content) return;
+
+		// If empty list/todo/toggle, convert to paragraph
+		if ((type === 'bullet_list' || type === 'numbered_list' || type === 'todo' || type === 'toggle') && content.textContent.trim() === '') {
+			rebuildBlock(wrapper, 'paragraph');
+			return;
+		}
+
+		// Split block at cursor
+		var sel = window.getSelection();
+		var range = sel.getRangeAt(0);
+		var afterRange = document.createRange();
+		afterRange.setStart(range.endContainer, range.endOffset);
+		afterRange.setEndAfter(content.lastChild || content);
+		var afterFrag = afterRange.extractContents();
+		var afterDiv = document.createElement('div');
+		afterDiv.appendChild(afterFrag);
+		var afterHtml = afterDiv.innerHTML;
+		if (afterHtml === '<br>' || afterHtml === '') afterHtml = '';
+
+		ensureBR(content);
+
+		// Toggle: Enter creates a child block inside the toggle
+		if (type === 'toggle') {
+			var parentDepth = parseInt(wrapper.dataset.depth || '0', 10);
+			var childDepth = parentDepth + 1;
+			var childBlock = insertBlockAfter(wrapper, 'paragraph', afterHtml);
+			childBlock.dataset.parentBlockId = wrapper.dataset.blockId;
+			childBlock.dataset.depth = childDepth;
+			// Ensure toggle is open
+			var ti = wrapper.querySelector('.toggle-icon');
+			if (ti && !ti.classList.contains('open')) {
+				ti.classList.add('open');
+			}
+			// Move child after last existing child of this toggle
+			var allWrappers = Array.from(document.getElementById('blocks-container').querySelectorAll('.block-wrapper'));
+			var lastChild = wrapper;
+			allWrappers.forEach(function(w) {
+				if (w.dataset.parentBlockId === wrapper.dataset.blockId) lastChild = w;
+			});
+			if (lastChild !== wrapper) lastChild.after(childBlock);
+			setCursorToBlock(childBlock, false);
+			scheduleAutoSave();
+			return;
+		}
+
+		// New block type: same for lists/todos, paragraph otherwise
+		var newType = (type === 'bullet_list' || type === 'numbered_list' || type === 'todo') ? type : 'paragraph';
+		var newBlock = insertBlockAfter(wrapper, newType, afterHtml);
+
+		// Inherit parent for nested blocks
+		if (wrapper.dataset.parentBlockId) {
+			newBlock.dataset.parentBlockId = wrapper.dataset.parentBlockId;
+			newBlock.dataset.depth = wrapper.dataset.depth || '0';
+		}
+
+		updateNumberedLists();
+		return;
+	}
+
+	// Backspace at start of block
+	if (e.key === 'Backspace') {
+		var content = getBlockContent(wrapper);
+		if (!content) return;
+
+		var sel = window.getSelection();
+		if (sel.isCollapsed) {
+			var range = sel.getRangeAt(0);
+			// Check if cursor is at start
+			var testRange = document.createRange();
+			testRange.setStart(content, 0);
+			testRange.setEnd(range.startContainer, range.startOffset);
+			if (testRange.toString() === '') {
+				e.preventDefault();
+				if (type !== 'paragraph') {
+					// Convert to paragraph
+					rebuildBlock(wrapper, 'paragraph');
+				} else {
+					// Merge with previous block
+					var prev = wrapper.previousElementSibling;
+					while (prev && prev.dataset.type === 'divider') prev = prev.previousElementSibling;
+					if (prev) {
+						var prevContent = getBlockContent(prev);
+						if (prevContent && prevContent.contentEditable !== 'false') {
+							var myHtml = cleanContent(content.innerHTML);
+							// Set cursor to end of previous block, then append
+							setCursorToBlock(prev, true);
+							if (myHtml) {
+								setTimeout(function() {
+									prevContent.innerHTML = cleanContent(prevContent.innerHTML) + myHtml;
+									// Set cursor position
+									setCursorToBlock(prev, true);
+								}, 0);
+							}
+							wrapper.remove();
+							updateNumberedLists();
+							scheduleAutoSave();
+						}
+					}
+				}
+				return;
+			}
+		}
+	}
+
+	// Tab / Shift+Tab for indentation
+	if (e.key === 'Tab') {
+		if (type === 'bullet_list' || type === 'numbered_list' || type === 'todo') {
+			e.preventDefault();
+			if (e.shiftKey) {
+				outdentBlock(wrapper);
+			} else {
+				indentBlock(wrapper);
+			}
+			scheduleAutoSave();
+			return;
+		}
+	}
 }
 
-function handleEnter(e) {
-  const block = getCurrentBlock();
-  if (!block) return;
-  e.preventDefault();
+function handleEditorClick(e) {
+	// Handle link clicks
+	var link = e.target.closest('a[href]');
+	if (link && !link.hasAttribute('data-page-link')) {
+		e.preventDefault();
+		window.open(link.href, '_blank');
+		return;
+	}
 
-  const type = block.dataset.type;
+	// Handle internal page links
+	var pageLink = e.target.closest('a[data-page-link]');
+	if (pageLink) {
+		e.preventDefault();
+		selectPage(pageLink.dataset.pageLink);
+		return;
+	}
 
-  // Divider/image: just create a paragraph after
-  if (type === 'divider' || type === 'image') {
-    insertBlockAfter(block, 'paragraph', '');
-    return;
-  }
-
-  const contentEl = $('.block-content', block);
-  if (!contentEl) return;
-
-  const sel = window.getSelection();
-  if (!sel.rangeCount) return;
-  const range = sel.getRangeAt(0);
-
-  // If toggle block and cursor is in the title, create a child block
-  if (type === 'toggle') {
-    const text = contentEl.textContent;
-    // If at end or content is not empty, create child
-    const afterRange = document.createRange();
-    afterRange.setStart(range.endContainer, range.endOffset);
-    afterRange.setEndAfter(contentEl.lastChild || contentEl);
-    const afterFrag = afterRange.extractContents();
-    const afterHTML = fragmentToHTML(afterFrag);
-
-    // Create child paragraph
-    const childEl = createBlockEl({
-      id: tempId(), type: 'paragraph', content: afterHTML, properties: '{}',
-      parent_block_id: block.dataset.blockId,
-    });
-    childEl.classList.add('toggle-child');
-    childEl.dataset.parent = block.dataset.blockId;
-
-    // Insert after last child of this toggle, or right after the toggle
-    const children = $$(`[data-parent="${block.dataset.blockId}"]`);
-    const lastChild = children.length > 0 ? children[children.length - 1] : block;
-    lastChild.after(childEl);
-
-    // Ensure toggle is expanded
-    const arrow = $('.toggle-arrow', block);
-    if (arrow && !arrow.classList.contains('expanded')) {
-      arrow.classList.add('expanded');
-      $$(`[data-parent="${block.dataset.blockId}"]`).forEach(c => c.classList.remove('collapsed'));
-    }
-
-    setCursorToBlock(childEl, true);
-    scheduleAutoSave();
-    return;
-  }
-
-  // Toggle child: if empty, exit the toggle
-  if (block.dataset.parent && contentEl.textContent.trim() === '') {
-    // Convert to top-level paragraph after the parent toggle's children
-    delete block.dataset.parent;
-    block.classList.remove('toggle-child');
-    block.style.paddingLeft = '';
-    block.dataset.type = 'paragraph';
-
-    // Move after all siblings of the same parent
-    const parentId = block.dataset.parent;
-    // Already removed parent ref, just rebuild as paragraph
-    rebuildBlock(block, 'paragraph', '');
-    setCursorToBlock(block, true);
-    scheduleAutoSave();
-    return;
-  }
-
-  // Split content at cursor
-  const afterRange2 = document.createRange();
-  afterRange2.setStart(range.endContainer, range.endOffset);
-  if (contentEl.lastChild) {
-    afterRange2.setEndAfter(contentEl.lastChild);
-  } else {
-    afterRange2.setEnd(contentEl, contentEl.childNodes.length);
-  }
-  const afterFrag2 = afterRange2.extractContents();
-  const afterHTML2 = fragmentToHTML(afterFrag2);
-
-  // Determine new block type
-  let newType = 'paragraph';
-  if (type === 'bullet_list' || type === 'numbered_list' || type === 'todo') {
-    // If current block is now empty, convert it to paragraph instead
-    if (contentEl.textContent.trim() === '' && afterHTML2.trim() === '') {
-      convertBlock(block, 'paragraph');
-      setCursorToBlock(block, true);
-      scheduleAutoSave();
-      return;
-    }
-    newType = type;
-  }
-
-  // Create new block with the "after" content
-  const parentId = block.dataset.parent || '';
-  const newBlock = createBlockEl({
-    id: tempId(),
-    type: newType,
-    content: afterHTML2,
-    properties: newType === 'todo' ? '{"checked":false}' : '{}',
-    parent_block_id: parentId || undefined,
-  });
-  if (parentId) {
-    newBlock.classList.add('toggle-child');
-    newBlock.dataset.parent = parentId;
-  }
-
-  // Insert after current block (but before next non-child)
-  const nextNonChild = getNextNonChildSibling(block);
-  if (nextNonChild) {
-    block.parentElement.insertBefore(newBlock, nextNonChild);
-  } else {
-    block.parentElement.appendChild(newBlock);
-  }
-
-  setCursorToBlock(newBlock, true);
-  renumberLists();
-  scheduleAutoSave();
+	// Handle comment mark clicks
+	var mark = e.target.closest('mark.comment-mark');
+	if (mark) {
+		var commentId = mark.dataset.commentId;
+		document.getElementById('comments-panel').style.display = 'flex';
+		document.getElementById('shares-panel').style.display = 'none';
+		api('GET', '/api/pages/' + currentPageId + '/comments').then(function(comments) {
+			allComments = comments;
+			renderComments();
+			highlightComment(commentId);
+		});
+		return;
+	}
 }
 
-function handleBackspace(e) {
-  const block = getCurrentBlock();
-  if (!block) return;
+function handlePaste(e) {
+	var wrapper = getCurrentBlockWrapper();
+	if (!wrapper) return;
+	if (wrapper.dataset.type === 'code') return; // Let default paste in code blocks
 
-  const type = block.dataset.type;
-  if (type === 'divider' || type === 'image') {
-    e.preventDefault();
-    const prev = getPreviousBlock(block);
-    block.remove();
-    if (prev) setCursorToBlock(prev, false);
-    scheduleAutoSave();
-    return;
-  }
-
-  if (!isCursorAtStart()) return;
-
-  const contentEl = $('.block-content', block);
-  if (!contentEl) return;
-
-  e.preventDefault();
-
-  // If not paragraph, convert to paragraph
-  if (type !== 'paragraph') {
-    convertBlock(block, 'paragraph');
-    setCursorToBlock(block, true);
-    scheduleAutoSave();
-    return;
-  }
-
-  // Merge with previous
-  const prev = getPreviousBlock(block);
-  if (!prev) return;
-  if (prev.dataset.type === 'divider' || prev.dataset.type === 'image') {
-    prev.remove();
-    scheduleAutoSave();
-    return;
-  }
-
-  const prevContent = $('.block-content', prev);
-  if (!prevContent) return;
-
-  // Save cursor position at end of previous
-  const savedLen = prevContent.textContent.length;
-
-  // Move content from current to previous
-  while (contentEl.firstChild) {
-    prevContent.appendChild(contentEl.firstChild);
-  }
-  block.remove();
-
-  setCursorToBlockAt(prev, savedLen);
-  renumberLists();
-  scheduleAutoSave();
+	// Paste as plain text in regular blocks
+	var text = e.clipboardData.getData('text/html') || e.clipboardData.getData('text/plain');
+	if (!e.clipboardData.getData('text/html')) {
+		e.preventDefault();
+		document.execCommand('insertText', false, text);
+	}
 }
 
-// --- Block Operations ---
-function insertBlockAfter(refBlock, type, content) {
-  const newBlock = createBlockEl({
-    id: tempId(), type, content, properties: type === 'todo' ? '{"checked":false}' : '{}',
-  });
-  const next = getNextNonChildSibling(refBlock);
-  if (next) {
-    refBlock.parentElement.insertBefore(newBlock, next);
-  } else {
-    refBlock.parentElement.appendChild(newBlock);
-  }
-  setCursorToBlock(newBlock, true);
-  renumberLists();
-  scheduleAutoSave();
-  return newBlock;
+// ---- Block operations ----
+function insertBlockAfter(refWrapper, type, content) {
+	var block = {
+		id: generateId(),
+		type: type,
+		content: content || '',
+		properties: {}
+	};
+	var wrapper = createBlockEl(block);
+	refWrapper.after(wrapper);
+
+	var contentEl = getBlockContent(wrapper);
+	if (contentEl) ensureBR(contentEl);
+	setCursorToBlock(wrapper, false);
+	scheduleAutoSave();
+	return wrapper;
 }
 
-function convertBlock(blockEl, newType) {
-  const oldType = blockEl.dataset.type;
-  if (oldType === newType) return;
+function rebuildBlock(wrapper, newType, checked) {
+	var oldContent = getBlockContent(wrapper);
+	var oldHtml = oldContent ? cleanContent(oldContent.innerHTML) : '';
+	var oldType = wrapper.dataset.type;
 
-  const contentEl = $('.block-content', blockEl);
-  const oldContent = contentEl ? contentEl.innerHTML : '';
+	wrapper.dataset.type = newType;
 
-  blockEl.dataset.type = newType;
+	// Remove type-specific elements
+	var cb = wrapper.querySelector('.todo-checkbox');
+	if (cb) cb.remove();
+	var ti = wrapper.querySelector('.toggle-icon');
+	if (ti) ti.remove();
+	var numSpan = wrapper.querySelector('.list-number');
+	if (numSpan) numSpan.remove();
+	if (oldContent) oldContent.remove();
 
-  if (newType === 'divider') {
-    blockEl.contentEditable = 'false';
-    blockEl.innerHTML = '';
-    const handle = document.createElement('div');
-    handle.className = 'block-handle';
-    handle.contentEditable = 'false';
-    handle.draggable = true;
-    handle.innerHTML = '<svg viewBox="0 0 10 20"><circle cx="3" cy="4" r="1.2"/><circle cx="7" cy="4" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="16" r="1.2"/><circle cx="7" cy="16" r="1.2"/></svg>';
-    blockEl.appendChild(handle);
-    const hr = document.createElement('hr');
-    hr.className = 'divider-line';
-    blockEl.appendChild(hr);
-    // Create a new paragraph after
-    insertBlockAfter(blockEl, 'paragraph', '');
-    return;
-  }
+	var handle = wrapper.querySelector('.block-handle');
 
-  rebuildBlock(blockEl, newType, oldContent);
+	if (newType === 'todo') {
+		var newCb = document.createElement('input');
+		newCb.type = 'checkbox';
+		newCb.className = 'todo-checkbox';
+		newCb.contentEditable = 'false';
+		newCb.checked = !!checked;
+		if (newCb.checked) wrapper.classList.add('checked');
+		else wrapper.classList.remove('checked');
+		newCb.addEventListener('change', function() {
+			wrapper.classList.toggle('checked', newCb.checked);
+			scheduleAutoSave();
+		});
+		handle.after(newCb);
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.innerHTML = oldHtml || '<br>';
+		wrapper.appendChild(content);
+		ensureBR(content);
+		setCursorToBlock(wrapper, false);
+	} else if (newType === 'toggle') {
+		var toggleIcon = document.createElement('span');
+		toggleIcon.className = 'toggle-icon';
+		toggleIcon.contentEditable = 'false';
+		toggleIcon.textContent = '▶';
+		toggleIcon.addEventListener('click', function() {
+			toggleIcon.classList.toggle('open');
+			var isOpen = toggleIcon.classList.contains('open');
+			var container = document.getElementById('blocks-container');
+			var allWrappers = Array.from(container.querySelectorAll('.block-wrapper'));
+			var myId = wrapper.dataset.blockId;
+			var children = allWrappers.filter(function(w) { return w.dataset.parentBlockId === myId; });
+			if (isOpen && children.length === 0) {
+				var parentDepth = parseInt(wrapper.dataset.depth || '0', 10);
+				var childBlock = insertBlockAfter(wrapper, 'paragraph', '');
+				childBlock.dataset.parentBlockId = myId;
+				childBlock.dataset.depth = parentDepth + 1;
+				setCursorToBlock(childBlock, false);
+				scheduleAutoSave();
+			} else {
+				children.forEach(function(w) {
+					w.style.display = isOpen ? '' : 'none';
+				});
+			}
+		});
+		handle.after(toggleIcon);
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.innerHTML = oldHtml || '<br>';
+		wrapper.appendChild(content);
+		ensureBR(content);
+		setCursorToBlock(wrapper, false);
+	} else if (newType === 'numbered_list') {
+		var numSpan = document.createElement('span');
+		numSpan.className = 'list-number';
+		numSpan.contentEditable = 'false';
+		numSpan.textContent = '1.';
+		handle.after(numSpan);
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.innerHTML = oldHtml || '<br>';
+		wrapper.appendChild(content);
+		ensureBR(content);
+		setCursorToBlock(wrapper, false);
+		updateNumberedLists();
+	} else if (newType === 'divider') {
+		wrapper.classList.remove('checked');
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.contentEditable = 'false';
+		content.innerHTML = '<hr>';
+		wrapper.appendChild(content);
+		// Insert a new paragraph after
+		insertBlockAfter(wrapper, 'paragraph', '');
+	} else if (newType === 'code') {
+		wrapper.classList.remove('checked');
+		var codeWrapper = document.createElement('div');
+		codeWrapper.className = 'block-content code-block-wrapper';
+		codeWrapper.contentEditable = 'false';
+		var langSelect = createCodeLangSelect('');
+		codeWrapper.appendChild(langSelect);
+		var pre = document.createElement('pre');
+		var code = document.createElement('code');
+		code.contentEditable = 'true';
+		code.textContent = oldHtml.replace(/<[^>]*>/g, '') || '';
+		code.addEventListener('input', function() { scheduleAutoSave(); });
+		code.addEventListener('keydown', function(e) {
+			if (e.key === 'Tab') {
+				e.preventDefault();
+				document.execCommand('insertText', false, '  ');
+			}
+		});
+		pre.appendChild(code);
+		codeWrapper.appendChild(pre);
+		wrapper.appendChild(codeWrapper);
+		setTimeout(function() { code.focus(); }, 50);
+	} else if (newType === 'math') {
+		wrapper.classList.remove('checked');
+		var mathDiv = document.createElement('div');
+		mathDiv.className = 'block-content math-block';
+		mathDiv.contentEditable = 'false';
+		var preview = document.createElement('div');
+		preview.className = 'math-preview';
+		preview.addEventListener('click', function() {
+			mathDiv.classList.add('editing');
+			mathInput.focus();
+		});
+		mathDiv.appendChild(preview);
+		var mathInput = document.createElement('div');
+		mathInput.className = 'math-input';
+		mathInput.contentEditable = 'true';
+		mathInput.textContent = '';
+		mathInput.addEventListener('blur', function() {
+			mathDiv.classList.remove('editing');
+			renderSingleMath(mathDiv);
+			scheduleAutoSave();
+		});
+		mathInput.addEventListener('input', function() { scheduleAutoSave(); });
+		mathInput.addEventListener('keydown', function(e) {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				mathInput.blur();
+			}
+		});
+		mathDiv.appendChild(mathInput);
+		wrapper.appendChild(mathDiv);
+		mathDiv.classList.add('editing');
+		setTimeout(function() { mathInput.focus(); }, 50);
+	} else if (newType === 'image') {
+		wrapper.classList.remove('checked');
+		var imgDiv = document.createElement('div');
+		imgDiv.className = 'block-content image-block';
+		imgDiv.contentEditable = 'false';
+		var placeholder = document.createElement('div');
+		placeholder.className = 'image-upload-placeholder';
+		placeholder.textContent = 'Click to upload image';
+		placeholder.addEventListener('click', function() { uploadImage(wrapper); });
+		imgDiv.appendChild(placeholder);
+		wrapper.appendChild(imgDiv);
+	} else if (newType === 'file') {
+		wrapper.classList.remove('checked');
+		var fileDiv = document.createElement('div');
+		fileDiv.className = 'block-content file-block';
+		fileDiv.contentEditable = 'false';
+		var uploadBtn = document.createElement('div');
+		uploadBtn.className = 'image-upload-placeholder';
+		uploadBtn.textContent = 'Click to upload file';
+		uploadBtn.addEventListener('click', function() { uploadFile(wrapper); });
+		fileDiv.appendChild(uploadBtn);
+		wrapper.appendChild(fileDiv);
+	} else if (newType === 'page_link') {
+		wrapper.classList.remove('checked');
+		showPageLinkModal(wrapper);
+		// Temp placeholder
+		var linkDiv = document.createElement('div');
+		linkDiv.className = 'block-content page-link-block';
+		linkDiv.contentEditable = 'false';
+		linkDiv.textContent = '📄 Select a page...';
+		wrapper.appendChild(linkDiv);
+	} else if (newType === 'table') {
+		wrapper.classList.remove('checked');
+		var tableDiv = document.createElement('div');
+		tableDiv.className = 'block-content table-wrapper';
+		tableDiv.contentEditable = 'false';
+		tableDiv.appendChild(createTableElement([['Header 1', 'Header 2'], ['', '']]));
+		tableDiv.appendChild(createTableControls(tableDiv));
+		wrapper.appendChild(tableDiv);
+	} else {
+		// paragraph, heading1-3, bullet_list, quote, callout
+		wrapper.classList.remove('checked');
+		var content = document.createElement('div');
+		content.className = 'block-content';
+		content.innerHTML = oldHtml || '<br>';
+		wrapper.appendChild(content);
+		ensureBR(content);
+		setCursorToBlock(wrapper, false);
+	}
 }
 
-function rebuildBlock(blockEl, type, content) {
-  // Keep the handle
-  const handle = $('.block-handle', blockEl);
+// ---- Indentation (Tab/Shift+Tab) ----
+function indentBlock(wrapper) {
+	var container = document.getElementById('blocks-container');
+	var allWrappers = Array.from(container.querySelectorAll('.block-wrapper'));
+	var idx = allWrappers.indexOf(wrapper);
+	if (idx <= 0) return;
 
-  blockEl.innerHTML = '';
-  blockEl.removeAttribute('contenteditable');
-  blockEl.dataset.type = type;
-  blockEl.classList.remove('checked');
+	// Find previous sibling at same or higher level
+	var prevSibling = null;
+	for (var i = idx - 1; i >= 0; i--) {
+		var w = allWrappers[i];
+		if ((w.dataset.parentBlockId || '') === (wrapper.dataset.parentBlockId || '')) {
+			prevSibling = w;
+			break;
+		}
+	}
+	if (!prevSibling) return;
 
-  if (handle) blockEl.appendChild(handle);
-  else {
-    const h = document.createElement('div');
-    h.className = 'block-handle';
-    h.contentEditable = 'false';
-    h.draggable = true;
-    h.innerHTML = '<svg viewBox="0 0 10 20"><circle cx="3" cy="4" r="1.2"/><circle cx="7" cy="4" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="16" r="1.2"/><circle cx="7" cy="16" r="1.2"/></svg>';
-    blockEl.appendChild(h);
-  }
+	// Check depth limit
+	var currentDepth = parseInt(wrapper.dataset.depth || '0');
+	if (currentDepth >= 4) return;
 
-  if (type === 'bullet_list' || type === 'numbered_list' || type === 'todo' || type === 'toggle') {
-    const row = document.createElement('div');
-    row.className = 'block-row';
-
-    if (type === 'bullet_list') {
-      const m = document.createElement('span');
-      m.className = 'list-marker'; m.contentEditable = 'false'; m.textContent = '•';
-      row.appendChild(m);
-    } else if (type === 'numbered_list') {
-      const m = document.createElement('span');
-      m.className = 'list-marker'; m.contentEditable = 'false'; m.textContent = '1.';
-      row.appendChild(m);
-    } else if (type === 'todo') {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.className = 'todo-checkbox';
-      cb.contentEditable = 'false';
-      cb.onchange = () => { blockEl.classList.toggle('checked', cb.checked); scheduleAutoSave(); };
-      row.appendChild(cb);
-    } else if (type === 'toggle') {
-      const arrow = document.createElement('span');
-      arrow.className = 'toggle-arrow expanded';
-      arrow.contentEditable = 'false'; arrow.textContent = '▶';
-      arrow.onclick = () => toggleToggle(blockEl);
-      row.appendChild(arrow);
-    }
-
-    const c = document.createElement('div');
-    c.className = 'block-content';
-    c.innerHTML = content;
-    setPlaceholder(c, type);
-    row.appendChild(c);
-    blockEl.appendChild(row);
-  } else {
-    const c = document.createElement('div');
-    c.className = 'block-content';
-    c.innerHTML = content;
-    setPlaceholder(c, type);
-    blockEl.appendChild(c);
-  }
+	wrapper.dataset.parentBlockId = prevSibling.dataset.blockId;
+	wrapper.dataset.depth = currentDepth + 1;
+	updateNumberedLists();
 }
 
-// --- Cursor / Selection Helpers ---
-function getCurrentBlock() {
-  const sel = window.getSelection();
-  if (!sel.rangeCount) return null;
-  let node = sel.anchorNode;
-  while (node && node !== document) {
-    if (node.nodeType === 1 && node.classList && node.classList.contains('block-wrapper')) {
-      return node;
-    }
-    node = node.parentElement;
-  }
-  return null;
+function outdentBlock(wrapper) {
+	var parentId = wrapper.dataset.parentBlockId;
+	if (!parentId) return;
+
+	var container = document.getElementById('blocks-container');
+	var parentWrapper = container.querySelector('[data-block-id="' + parentId + '"]');
+	if (!parentWrapper) return;
+
+	wrapper.dataset.parentBlockId = parentWrapper.dataset.parentBlockId || '';
+	if (!wrapper.dataset.parentBlockId) delete wrapper.dataset.parentBlockId;
+	var newDepth = parseInt(wrapper.dataset.depth || '1') - 1;
+	if (newDepth > 0) wrapper.dataset.depth = newDepth;
+	else delete wrapper.dataset.depth;
+	updateNumberedLists();
 }
 
-function isCursorAtStart() {
-  const sel = window.getSelection();
-  if (!sel.rangeCount || !sel.isCollapsed) return false;
-  const range = sel.getRangeAt(0);
-  const block = getCurrentBlock();
-  if (!block) return false;
-  const content = $('.block-content', block);
-  if (!content) return false;
+// ---- Numbered list numbering ----
+function updateNumberedLists() {
+	var container = document.getElementById('blocks-container');
+	var allWrappers = Array.from(container.querySelectorAll('.block-wrapper'));
 
-  const preRange = document.createRange();
-  preRange.setStart(content, 0);
-  preRange.setEnd(range.startContainer, range.startOffset);
-  return preRange.toString().length === 0;
+	// Group by parent
+	var groups = {};
+	allWrappers.forEach(function(w) {
+		if (w.dataset.type !== 'numbered_list') return;
+		var parentKey = w.dataset.parentBlockId || '__root__';
+		if (!groups[parentKey]) groups[parentKey] = [];
+		groups[parentKey].push(w);
+	});
+
+	Object.keys(groups).forEach(function(key) {
+		var wrappers = groups[key];
+		// Re-count within each parent, restarting when non-numbered blocks appear
+		var count = 0;
+		var allSiblings = allWrappers.filter(function(w) {
+			return (w.dataset.parentBlockId || '__root__') === key;
+		});
+		allSiblings.forEach(function(w) {
+			if (w.dataset.type === 'numbered_list') {
+				count++;
+				var numSpan = w.querySelector('.list-number');
+				if (numSpan) numSpan.textContent = count + '.';
+			} else {
+				count = 0;
+			}
+		});
+	});
 }
 
-function setCursorToBlock(blockEl, atStart) {
-  const container = $('#blocks-container');
-  container.focus();
-  requestAnimationFrame(() => {
-    const content = $('.block-content', blockEl);
-    if (!content) return;
-    const sel = window.getSelection();
-    const range = document.createRange();
-    if (atStart || !content.firstChild) {
-      range.setStart(content, 0);
-      range.collapse(true);
-    } else {
-      if (content.lastChild) {
-        if (content.lastChild.nodeType === 3) {
-          range.setStart(content.lastChild, content.lastChild.length);
-        } else {
-          range.setStartAfter(content.lastChild);
-        }
-        range.collapse(true);
-      }
-    }
-    sel.removeAllRanges();
-    sel.addRange(range);
-  });
-}
-
-function setCursorToBlockAt(blockEl, textOffset) {
-  const container = $('#blocks-container');
-  container.focus();
-  requestAnimationFrame(() => {
-    const content = $('.block-content', blockEl);
-    if (!content) return;
-    const sel = window.getSelection();
-    const range = document.createRange();
-
-    // Walk text nodes to find position
-    let remaining = textOffset;
-    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (remaining <= node.length) {
-        range.setStart(node, remaining);
-        range.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(range);
-        return;
-      }
-      remaining -= node.length;
-    }
-
-    // Fallback: end of content
-    if (content.lastChild) {
-      if (content.lastChild.nodeType === 3) {
-        range.setStart(content.lastChild, content.lastChild.length);
-      } else {
-        range.setStartAfter(content.lastChild);
-      }
-    } else {
-      range.setStart(content, 0);
-    }
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  });
-}
-
-function getPreviousBlock(blockEl) {
-  let el = blockEl.previousElementSibling;
-  while (el && !el.classList.contains('block-wrapper')) el = el.previousElementSibling;
-  return el;
-}
-
-function getNextNonChildSibling(blockEl) {
-  const blockId = blockEl.dataset.blockId;
-  let el = blockEl.nextElementSibling;
-  while (el && el.dataset.parent === blockId) {
-    el = el.nextElementSibling;
-  }
-  return el;
-}
-
-function fragmentToHTML(frag) {
-  const div = document.createElement('div');
-  div.appendChild(frag);
-  return div.innerHTML;
-}
-
-// --- Slash Commands ---
+// ---- Slash menu ----
 function showSlashMenu() {
-  const block = slashState?.blockEl;
-  if (!block) return;
-  const content = $('.block-content', block);
-  if (!content) return;
+	var slash = document.getElementById('slash-menu');
+	var items = SLASH_ITEMS.filter(function(item) {
+		if (!slashQuery) return true;
+		var q = slashQuery.toLowerCase();
+		return item.label.toLowerCase().indexOf(q) !== -1 || item.keywords.toLowerCase().indexOf(q) !== -1;
+	});
 
-  const sel = window.getSelection();
-  if (!sel.rangeCount) return;
-  const rect = sel.getRangeAt(0).getBoundingClientRect();
+	if (items.length === 0) {
+		slash.style.display = 'none';
+		return;
+	}
 
-  const menu = $('#slash-menu');
-  menu.style.display = 'block';
-  menu.style.left = rect.left + 'px';
-  menu.style.top = (rect.bottom + 4) + 'px';
+	slash.innerHTML = '';
+	items.forEach(function(item, idx) {
+		var div = document.createElement('div');
+		div.className = 'slash-item' + (idx === 0 ? ' active' : '');
+		div.innerHTML = '<span class="slash-icon">' + item.icon + '</span><span class="slash-label">' + item.label + '</span>';
+		div.addEventListener('mousedown', function(e) {
+			e.preventDefault();
+			applySlashItem(item);
+		});
+		slash.appendChild(div);
+	});
 
-  filteredSlashItems = [...SLASH_ITEMS];
-  slashActiveIndex = 0;
-  renderSlashItems();
+	// Position near cursor
+	var sel = window.getSelection();
+	if (sel.rangeCount > 0) {
+		var rect = sel.getRangeAt(0).getBoundingClientRect();
+		slash.style.left = rect.left + 'px';
+		slash.style.top = (rect.bottom + 4) + 'px';
+	}
+	slash.style.display = 'block';
 }
 
 function hideSlashMenu() {
-  $('#slash-menu').style.display = 'none';
-  slashState = null;
+	document.getElementById('slash-menu').style.display = 'none';
+	slashQuery = '';
+	slashBlockId = null;
 }
 
-function updateSlashFilter() {
-  if (!slashState) return;
-  const content = $('.block-content', slashState.blockEl);
-  if (!content) { hideSlashMenu(); return; }
+function navigateSlashMenu(dir) {
+	var slash = document.getElementById('slash-menu');
+	var items = slash.querySelectorAll('.slash-item');
+	var active = slash.querySelector('.slash-item.active');
+	if (!active || items.length === 0) return;
 
-  const text = content.textContent;
-  const slashIdx = text.lastIndexOf('/');
-  if (slashIdx === -1) { hideSlashMenu(); return; }
-
-  const query = text.substring(slashIdx + 1).toLowerCase();
-  filteredSlashItems = SLASH_ITEMS.filter(item =>
-    item.label.toLowerCase().includes(query) || item.type.includes(query)
-  );
-  slashActiveIndex = Math.min(slashActiveIndex, Math.max(filteredSlashItems.length - 1, 0));
-  renderSlashItems();
-
-  if (filteredSlashItems.length === 0) {
-    $('#slash-menu').style.display = 'none';
-  } else {
-    $('#slash-menu').style.display = 'block';
-  }
+	var idx = Array.from(items).indexOf(active);
+	active.classList.remove('active');
+	idx = (idx + dir + items.length) % items.length;
+	items[idx].classList.add('active');
+	items[idx].scrollIntoView({ block: 'nearest' });
 }
 
-function renderSlashItems() {
-  const container = $('#slash-menu-items');
-  container.innerHTML = '';
-  filteredSlashItems.forEach((item, i) => {
-    const div = document.createElement('div');
-    div.className = 'slash-item' + (i === slashActiveIndex ? ' active' : '');
-    div.innerHTML = `<span class="slash-item-icon">${item.icon}</span><span>${item.label}</span>`;
-    div.onmousedown = e => {
-      e.preventDefault();
-      executeSlashCommand(item.type);
-      hideSlashMenu();
-    };
-    container.appendChild(div);
-  });
+function selectSlashItem() {
+	var slash = document.getElementById('slash-menu');
+	var active = slash.querySelector('.slash-item.active');
+	if (!active) return;
+	active.dispatchEvent(new MouseEvent('mousedown'));
 }
 
-function executeSlashCommand(type) {
-  if (!slashState) return;
-  const block = slashState.blockEl;
-  const content = $('.block-content', block);
-  if (!content) return;
+function applySlashItem(item) {
+	var blockId = slashBlockId;
+	hideSlashMenu();
+	var container = document.getElementById('blocks-container');
+	var wrapper = container.querySelector('[data-block-id="' + blockId + '"]');
+	if (!wrapper) return;
 
-  // Remove the slash and query from content
-  const text = content.textContent;
-  const slashIdx = text.lastIndexOf('/');
-  if (slashIdx >= 0) {
-    // Remove from slash to end
-    const before = text.substring(0, slashIdx);
-    content.textContent = before;
-  }
+	// Clear the slash command text
+	var content = getBlockContent(wrapper);
+	if (content) content.innerHTML = '<br>';
 
-  hideSlashMenu();
-
-  if (type === 'image') {
-    // Trigger file upload
-    $('#image-upload').dataset.targetBlock = block.dataset.blockId;
-    $('#image-upload').click();
-    return;
-  }
-
-  if (content.textContent.trim() === '' || block.dataset.type === 'paragraph') {
-    convertBlock(block, type);
-    if (type !== 'divider') setCursorToBlock(block, true);
-  } else {
-    insertBlockAfter(block, type, '');
-  }
-  scheduleAutoSave();
+	rebuildBlock(wrapper, item.type);
+	scheduleAutoSave();
 }
 
-// --- Image Upload ---
-async function handleImageUpload(e) {
-  const file = e.target.files[0];
-  if (!file) return;
+// ---- Inline code toggle ----
+function toggleInlineCode() {
+	var sel = window.getSelection();
+	if (sel.isCollapsed) return;
 
-  const form = new FormData();
-  form.append('file', file);
-  const result = await api('POST', '/api/upload', form);
-  if (!result || !result.src) return;
+	var range = sel.getRangeAt(0);
+	var container = range.commonAncestorContainer;
 
-  const targetId = e.target.dataset.targetBlock;
-  const block = $(`[data-block-id="${targetId}"]`);
+	// Check if selection is within a code element
+	var codeEl = null;
+	var node = container;
+	while (node && node !== document.getElementById('blocks-container')) {
+		if (node.nodeName === 'CODE' && node.classList && node.classList.contains('inline-code')) {
+			codeEl = node;
+			break;
+		}
+		node = node.parentNode;
+	}
 
-  if (block && block.dataset.type === 'paragraph' && !$('.block-content', block)?.textContent.trim()) {
-    // Convert existing empty block to image
-    block.dataset.type = 'image';
-    block.innerHTML = '';
-    const handle = document.createElement('div');
-    handle.className = 'block-handle'; handle.contentEditable = 'false'; handle.draggable = true;
-    handle.innerHTML = '<svg viewBox="0 0 10 20"><circle cx="3" cy="4" r="1.2"/><circle cx="7" cy="4" r="1.2"/><circle cx="3" cy="10" r="1.2"/><circle cx="7" cy="10" r="1.2"/><circle cx="3" cy="16" r="1.2"/><circle cx="7" cy="16" r="1.2"/></svg>';
-    block.appendChild(handle);
-    const content = document.createElement('div');
-    content.className = 'block-content'; content.contentEditable = 'false';
-    const img = document.createElement('img');
-    img.src = result.src;
-    content.appendChild(img);
-    block.appendChild(content);
-  } else {
-    // Insert new image block
-    const ref = block || $$('#blocks-container > .block-wrapper').pop();
-    if (ref) {
-      const imgBlock = createBlockEl({ id: tempId(), type: 'image', content: '', properties: JSON.stringify({ src: result.src }) });
-      ref.after(imgBlock);
-    }
-  }
-  e.target.value = '';
-  scheduleAutoSave();
+	if (codeEl) {
+		// Remove code formatting - extract text, replace code element
+		var text = codeEl.textContent;
+		var textNode = document.createTextNode(text);
+		codeEl.parentNode.replaceChild(textNode, codeEl);
+		// Reselect the text
+		var newRange = document.createRange();
+		newRange.selectNodeContents(textNode);
+		sel.removeAllRanges();
+		sel.addRange(newRange);
+	} else {
+		// Wrap in code
+		var text = range.toString();
+		var code = document.createElement('code');
+		code.className = 'inline-code';
+		range.deleteContents();
+		code.textContent = text;
+		range.insertNode(code);
+		// Select the code contents
+		var newRange = document.createRange();
+		newRange.selectNodeContents(code);
+		sel.removeAllRanges();
+		sel.addRange(newRange);
+	}
+	scheduleAutoSave();
 }
 
-// --- Drag and Drop ---
-function handleDragStart(e) {
-  const handle = e.target.closest('.block-handle');
-  if (!handle) return;
-  const block = handle.closest('.block-wrapper');
-  if (!block) return;
-  dragState = { el: block };
-  e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', '');
-  block.style.opacity = '0.4';
+// ---- Block drag and drop ----
+function handleBlockDragStart(e) {
+	var handle = e.target.closest('.block-handle');
+	if (!handle) return;
+	var wrapper = handle.closest('.block-wrapper');
+	if (!wrapper) return;
+
+	draggedBlockId = wrapper.dataset.blockId;
+	wrapper.classList.add('dragging');
+	e.dataTransfer.effectAllowed = 'move';
+	e.dataTransfer.setData('text/plain', draggedBlockId);
 }
 
-function handleDragOver(e) {
-  if (!dragState) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
+function handleBlockDragOver(e) {
+	if (!draggedBlockId) return;
+	e.preventDefault();
+	e.dataTransfer.dropEffect = 'move';
 
-  const container = $('#blocks-container');
-  const wrappers = $$(':scope > .block-wrapper', container);
-  const indicator = $('#drag-indicator');
+	var wrapper = getBlockWrapper(e.target);
+	if (!wrapper || wrapper.dataset.blockId === draggedBlockId) return;
 
-  let closest = null;
-  let closestOffset = Infinity;
-  let insertBefore = true;
+	// Clear existing indicators
+	document.querySelectorAll('.block-wrapper.drag-above, .block-wrapper.drag-below').forEach(function(w) {
+		w.classList.remove('drag-above', 'drag-below');
+	});
 
-  wrappers.forEach(w => {
-    if (w === dragState.el) return;
-    const rect = w.getBoundingClientRect();
-    const mid = rect.top + rect.height / 2;
-    const offset = e.clientY - mid;
-    if (Math.abs(offset) < Math.abs(closestOffset)) {
-      closestOffset = offset;
-      closest = w;
-      insertBefore = offset < 0;
-    }
-  });
-
-  if (closest) {
-    const rect = closest.getBoundingClientRect();
-    const y = insertBefore ? rect.top : rect.bottom;
-    indicator.style.display = 'block';
-    indicator.style.left = rect.left + 'px';
-    indicator.style.top = y + 'px';
-    indicator.style.width = rect.width + 'px';
-    indicator.dataset.target = closest.dataset.blockId;
-    indicator.dataset.before = insertBefore;
-  }
+	var rect = wrapper.getBoundingClientRect();
+	var mid = rect.top + rect.height / 2;
+	if (e.clientY < mid) {
+		wrapper.classList.add('drag-above');
+	} else {
+		wrapper.classList.add('drag-below');
+	}
 }
 
-function handleDrop(e) {
-  if (!dragState) return;
-  e.preventDefault();
-  const indicator = $('#drag-indicator');
-  const targetId = indicator.dataset.target;
-  const insertBefore = indicator.dataset.before === 'true';
-  const target = $(`[data-block-id="${targetId}"]`);
-
-  if (target && target !== dragState.el) {
-    if (insertBefore) {
-      target.before(dragState.el);
-    } else {
-      target.after(dragState.el);
-    }
-    // Also move children of dragged block if it's a toggle
-    if (dragState.el.dataset.type === 'toggle') {
-      const children = $$(`[data-parent="${dragState.el.dataset.blockId}"]`);
-      let after = dragState.el;
-      children.forEach(c => { after.after(c); after = c; });
-    }
-  }
-
-  cleanupDrag();
-  renumberLists();
-  scheduleAutoSave();
+function handleBlockDragLeave(e) {
+	var wrapper = getBlockWrapper(e.target);
+	if (wrapper) {
+		wrapper.classList.remove('drag-above', 'drag-below');
+	}
 }
 
-function handleDragEnd() {
-  cleanupDrag();
+function handleBlockDrop(e) {
+	e.preventDefault();
+	if (!draggedBlockId) return;
+
+	var targetWrapper = getBlockWrapper(e.target);
+	if (!targetWrapper || targetWrapper.dataset.blockId === draggedBlockId) return;
+
+	var container = document.getElementById('blocks-container');
+	var draggedWrapper = container.querySelector('[data-block-id="' + draggedBlockId + '"]');
+	if (!draggedWrapper) return;
+
+	var rect = targetWrapper.getBoundingClientRect();
+	var mid = rect.top + rect.height / 2;
+
+	if (e.clientY < mid) {
+		targetWrapper.before(draggedWrapper);
+	} else {
+		targetWrapper.after(draggedWrapper);
+	}
+
+	handleBlockDragEnd();
+	scheduleAutoSave();
 }
 
-function cleanupDrag() {
-  if (dragState?.el) dragState.el.style.opacity = '';
-  dragState = null;
-  $('#drag-indicator').style.display = 'none';
+function handleBlockDragEnd() {
+	if (draggedBlockId) {
+		var container = document.getElementById('blocks-container');
+		var wrapper = container.querySelector('[data-block-id="' + draggedBlockId + '"]');
+		if (wrapper) wrapper.classList.remove('dragging');
+	}
+	draggedBlockId = null;
+	document.querySelectorAll('.block-wrapper.drag-above, .block-wrapper.drag-below').forEach(function(w) {
+		w.classList.remove('drag-above', 'drag-below');
+	});
 }
 
-// --- Editor Click ---
-function handleEditorClick(e) {
-  // Click on comment mark
-  const mark = e.target.closest('mark.comment-mark');
-  if (mark) {
-    const commentId = mark.dataset.commentId;
-    showCommentsSidebar();
-    highlightCommentInSidebar(commentId);
-    return;
-  }
-
-  // Click on toggle arrow
-  if (e.target.closest('.toggle-arrow')) return; // handled by onclick
-  // Click on checkbox
-  if (e.target.closest('.todo-checkbox')) return; // handled by onchange
+// ---- Uploads ----
+function uploadImage(wrapper) {
+	var input = document.createElement('input');
+	input.type = 'file';
+	input.accept = 'image/*';
+	input.addEventListener('change', function() {
+		if (!input.files[0]) return;
+		var form = new FormData();
+		form.append('file', input.files[0]);
+		api('POST', '/api/upload', form).then(function(result) {
+			var imgDiv = wrapper.querySelector('.image-block');
+			imgDiv.innerHTML = '';
+			var img = document.createElement('img');
+			img.src = result.src;
+			imgDiv.appendChild(img);
+			scheduleAutoSave();
+		});
+	});
+	input.click();
 }
 
-// --- Text Selection / Comments ---
+function uploadFile(wrapper) {
+	var input = document.createElement('input');
+	input.type = 'file';
+	input.addEventListener('change', function() {
+		if (!input.files[0]) return;
+		var form = new FormData();
+		form.append('file', input.files[0]);
+		api('POST', '/api/upload', form).then(function(result) {
+			var fileDiv = wrapper.querySelector('.file-block');
+			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(result.src) + '" download="' + escapeHtml(result.filename) + '">' + escapeHtml(result.filename) + '</a>';
+			wrapper.querySelector('.block-content').dataset.src = result.src;
+			wrapper.querySelector('.block-content').dataset.filename = result.filename;
+			scheduleAutoSave();
+		});
+	});
+	input.click();
+}
+
+// ---- Page link modal ----
+function showPageLinkModal(wrapper) {
+	var modal = document.getElementById('page-link-modal');
+	var searchInput = document.getElementById('page-link-search');
+	var results = document.getElementById('page-link-results');
+
+	modal.style.display = 'flex';
+	searchInput.value = '';
+	searchInput.focus();
+
+	function renderResults() {
+		var q = searchInput.value.trim().toLowerCase();
+		results.innerHTML = '';
+		allPages.forEach(function(p) {
+			if (q && p.title.toLowerCase().indexOf(q) === -1) return;
+			if (p.id === currentPageId) return;
+			var item = document.createElement('div');
+			item.className = 'page-link-item';
+			item.textContent = (p.icon || '📄') + ' ' + p.title;
+			item.addEventListener('click', function() {
+				modal.style.display = 'none';
+				var linkDiv = wrapper.querySelector('.page-link-block');
+				linkDiv.textContent = '📄 ' + p.title;
+				linkDiv.dataset.pageId = p.id;
+				linkDiv.addEventListener('click', function() { selectPage(p.id); });
+				scheduleAutoSave();
+			});
+			results.appendChild(item);
+		});
+	}
+
+	searchInput.oninput = renderResults;
+	renderResults();
+}
+
+// ---- Emoji picker ----
+function toggleEmojiPicker() {
+	var picker = document.getElementById('emoji-picker');
+	if (picker.style.display !== 'none') {
+		picker.style.display = 'none';
+		return;
+	}
+
+	picker.innerHTML = '';
+	EMOJIS.forEach(function(emoji) {
+		var span = document.createElement('span');
+		span.className = 'emoji-item';
+		span.textContent = emoji;
+		span.addEventListener('click', function() {
+			if (!currentPageId) return;
+			currentPage.icon = emoji;
+			document.getElementById('page-icon-btn').textContent = emoji;
+			picker.style.display = 'none';
+			api('PUT', '/api/pages/' + currentPageId, { title: currentPage.title, icon: emoji });
+			loadPages();
+		});
+		picker.appendChild(span);
+	});
+
+	var btn = document.getElementById('page-icon-btn');
+	var rect = btn.getBoundingClientRect();
+	picker.style.left = rect.left + 'px';
+	picker.style.top = (rect.bottom + 4) + 'px';
+	picker.style.display = 'grid';
+}
+
+// ---- Auto-save ----
+function scheduleAutoSave() {
+	if (autoSaveTimer) clearTimeout(autoSaveTimer);
+	autoSaveTimer = setTimeout(function() {
+		autoSaveTimer = null;
+		doSave();
+	}, 1000);
+}
+
+function doSave() {
+	if (!currentPageId) return;
+
+	// Save page title/icon
+	api('PUT', '/api/pages/' + currentPageId, {
+		title: document.getElementById('page-title').value || 'Untitled',
+		icon: currentPage ? currentPage.icon || '' : ''
+	}).then(function() { loadPages(); });
+
+	// Collect blocks
+	var blocks = collectBlocks();
+	api('PUT', '/api/pages/' + currentPageId + '/blocks', blocks).then(function(page) {
+		if (page && page.updated_at) {
+			currentPage.updated_at = page.updated_at;
+		}
+	});
+}
+
+function collectBlocks() {
+	var container = document.getElementById('blocks-container');
+	var wrappers = container.querySelectorAll('.block-wrapper');
+	var blocks = [];
+
+	wrappers.forEach(function(wrapper, idx) {
+		var type = wrapper.dataset.type;
+		var content = '';
+		var properties = {};
+		var parentBlockId = wrapper.dataset.parentBlockId || null;
+
+		if (type === 'divider') {
+			content = '';
+		} else if (type === 'code') {
+			var code = wrapper.querySelector('code');
+			content = code ? code.innerText : '';
+			var lang = wrapper.querySelector('.code-language');
+			properties.language = lang ? lang.value : '';
+		} else if (type === 'image') {
+			var img = wrapper.querySelector('img');
+			properties.src = img ? img.src : '';
+			// Convert absolute URL to relative path
+			if (properties.src && properties.src.indexOf('/uploads/') !== -1) {
+				properties.src = '/uploads/' + properties.src.split('/uploads/').pop();
+			}
+		} else if (type === 'file') {
+			var link = wrapper.querySelector('.file-block a');
+			if (link) {
+				content = link.textContent;
+				var href = link.getAttribute('href') || '';
+				properties.src = href;
+				properties.filename = link.getAttribute('download') || content;
+			}
+		} else if (type === 'page_link') {
+			var linkDiv = wrapper.querySelector('.page-link-block');
+			properties.page_id = linkDiv ? linkDiv.dataset.pageId : '';
+			content = linkDiv ? linkDiv.textContent.replace(/^📄\s*/, '') : '';
+		} else if (type === 'table') {
+			var rows = [];
+			var table = wrapper.querySelector('table');
+			if (table) {
+				Array.from(table.rows).forEach(function(tr) {
+					var row = [];
+					Array.from(tr.cells).forEach(function(td) {
+						row.push(td.textContent);
+					});
+					rows.push(row);
+				});
+			}
+			properties.rows = rows;
+		} else if (type === 'math') {
+			var mathInput = wrapper.querySelector('.math-input');
+			content = mathInput ? mathInput.textContent : '';
+		} else if (type === 'todo') {
+			var bc = wrapper.querySelector('.block-content');
+			content = bc ? cleanContent(bc.innerHTML) : '';
+			var cb = wrapper.querySelector('.todo-checkbox');
+			properties.checked = cb ? cb.checked : false;
+		} else {
+			var bc = wrapper.querySelector('.block-content');
+			content = bc ? cleanContent(bc.innerHTML) : '';
+		}
+
+		blocks.push({
+			id: wrapper.dataset.blockId,
+			type: type,
+			content: content,
+			properties: properties,
+			position: idx,
+			parent_block_id: parentBlockId
+		});
+	});
+
+	return blocks;
+}
+
+// ---- Comments ----
+function openCommentsPanel() {
+	document.getElementById('comments-panel').style.display = 'flex';
+	document.getElementById('shares-panel').style.display = 'none';
+	loadComments();
+}
+
+function toggleCommentsPanel() {
+	var panel = document.getElementById('comments-panel');
+	if (panel.style.display !== 'none') {
+		panel.style.display = 'none';
+	} else {
+		openCommentsPanel();
+	}
+}
+
+function loadComments() {
+	if (!currentPageId) return;
+	api('GET', '/api/pages/' + currentPageId + '/comments').then(function(comments) {
+		allComments = comments;
+		renderComments();
+	});
+}
+
+function renderComments() {
+	var list = document.getElementById('comments-list');
+	list.innerHTML = '';
+
+	// Group into threads (top-level comments and their replies)
+	var threads = [];
+	var threadMap = {};
+
+	allComments.forEach(function(c) {
+		if (!c.parent_comment_id) {
+			var thread = { comment: c, replies: [] };
+			threads.push(thread);
+			threadMap[c.id] = thread;
+		}
+	});
+
+	allComments.forEach(function(c) {
+		if (c.parent_comment_id && threadMap[c.parent_comment_id]) {
+			threadMap[c.parent_comment_id].replies.push(c);
+		}
+	});
+
+	if (threads.length === 0) {
+		list.innerHTML = '<p style="color:#bbb;text-align:center;padding:20px;font-size:12px">Select text and click Comment to add one.</p>';
+		return;
+	}
+
+	// Sort by block position in document
+	var container = document.getElementById('blocks-container');
+	var allWrappers = container ? Array.from(container.querySelectorAll('.block-wrapper')) : [];
+	threads.sort(function(a, b) {
+		var aIdx = -1, bIdx = -1;
+		if (a.comment.block_id) {
+			aIdx = allWrappers.findIndex(function(w) { return w.dataset.blockId === a.comment.block_id; });
+		}
+		if (b.comment.block_id) {
+			bIdx = allWrappers.findIndex(function(w) { return w.dataset.blockId === b.comment.block_id; });
+		}
+		if (aIdx === -1 && bIdx === -1) return 0;
+		if (aIdx === -1) return 1;
+		if (bIdx === -1) return -1;
+		return aIdx - bIdx;
+	});
+
+	threads.forEach(function(thread) {
+		var threadDiv = document.createElement('div');
+		threadDiv.className = 'comment-thread' + (thread.comment.resolved ? ' resolved' : '');
+		threadDiv.dataset.commentId = thread.comment.id;
+
+		// Main comment
+		threadDiv.appendChild(createCommentItem(thread.comment, true));
+
+		// Replies
+		thread.replies.forEach(function(reply) {
+			threadDiv.appendChild(createCommentItem(reply, false));
+		});
+
+		// Reply form
+		var replyForm = document.createElement('div');
+		replyForm.className = 'comment-reply-form';
+		var textarea = document.createElement('textarea');
+		textarea.placeholder = 'Reply...';
+		replyForm.appendChild(textarea);
+		var submitBtn = document.createElement('button');
+		submitBtn.textContent = 'Reply';
+		submitBtn.addEventListener('click', function() {
+			if (!textarea.value.trim()) return;
+			api('POST', '/api/pages/' + currentPageId + '/comments', {
+				parent_comment_id: thread.comment.id,
+				content: textarea.value.trim()
+			}).then(function() { loadComments(); });
+		});
+		replyForm.appendChild(submitBtn);
+		threadDiv.appendChild(replyForm);
+
+		list.appendChild(threadDiv);
+	});
+}
+
+function createCommentItem(comment, isThread) {
+	var div = document.createElement('div');
+	div.className = 'comment-item';
+
+	var header = document.createElement('div');
+	header.className = 'comment-header';
+	var author = document.createElement('span');
+	author.className = 'comment-author';
+	author.textContent = comment.author;
+	header.appendChild(author);
+	var time = document.createElement('span');
+	time.className = 'comment-time';
+	time.textContent = formatTime(comment.created_at);
+	header.appendChild(time);
+	div.appendChild(header);
+
+	if (comment.highlighted_text && isThread) {
+		var quote = document.createElement('div');
+		quote.className = 'comment-quote';
+		quote.textContent = '"' + comment.highlighted_text + '"';
+		quote.style.cursor = 'pointer';
+		quote.addEventListener('click', function() {
+			var mark = document.querySelector('mark.comment-mark[data-comment-id="' + comment.id + '"]');
+			if (mark) {
+				mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+				mark.style.background = '#ffd54f';
+				setTimeout(function() { mark.style.background = ''; }, 2000);
+			}
+		});
+		div.appendChild(quote);
+	}
+
+	var text = document.createElement('div');
+	text.className = 'comment-text';
+	text.textContent = comment.content;
+	div.appendChild(text);
+
+	if (isThread && !comment.resolved) {
+		var actions = document.createElement('div');
+		actions.className = 'comment-actions';
+		var resolveBtn = document.createElement('button');
+		resolveBtn.textContent = 'Resolve';
+		resolveBtn.addEventListener('click', function() {
+			api('PUT', '/api/comments/' + comment.id + '/resolve').then(function() { loadComments(); });
+		});
+		actions.appendChild(resolveBtn);
+		div.appendChild(actions);
+	}
+
+	return div;
+}
+
+function highlightComment(commentId) {
+	var threads = document.querySelectorAll('.comment-thread');
+	threads.forEach(function(t) { t.classList.remove('highlight'); });
+	var target = document.querySelector('.comment-thread[data-comment-id="' + commentId + '"]');
+	if (target) {
+		target.classList.add('highlight');
+		target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+		setTimeout(function() { target.classList.remove('highlight'); }, 3000);
+	}
+}
+
 function handleTextSelection() {
-  const btn = $('#floating-comment-btn');
-  setTimeout(() => {
-    const sel = window.getSelection();
-    const text = sel?.toString().trim();
-    if (!text) {
-      btn.style.display = 'none';
-      return;
-    }
-    // Only show if selection is inside blocks-container or shared-content
-    let node = sel.anchorNode;
-    let inEditor = false;
-    while (node) {
-      if (node.id === 'blocks-container' || node.id === 'shared-content') {
-        inEditor = true; break;
-      }
-      node = node.parentElement;
-    }
-    if (!inEditor) { btn.style.display = 'none'; return; }
+	setTimeout(function() {
+		var sel = window.getSelection();
+		var text = sel.toString().trim();
+		var btn = document.getElementById('comment-float-btn');
 
-    const range = sel.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-    btn.style.display = 'block';
-    btn.style.left = (rect.left + rect.width / 2 - 30) + 'px';
-    btn.style.top = (rect.top - 32) + 'px';
-  }, 10);
+		if (!text || sel.rangeCount === 0) {
+			btn.style.display = 'none';
+			return;
+		}
+
+		// Check if selection is in blocks container
+		var range = sel.getRangeAt(0);
+		var container = document.getElementById('blocks-container');
+		if (!container.contains(range.commonAncestorContainer)) {
+			btn.style.display = 'none';
+			return;
+		}
+
+		var rect = range.getBoundingClientRect();
+		btn.style.left = (rect.left + rect.width / 2 - 30) + 'px';
+		btn.style.top = (rect.top - 32) + 'px';
+		btn.style.display = 'block';
+	}, 10);
 }
 
-function startCommentFromSelection() {
-  const sel = window.getSelection();
-  if (!sel.rangeCount) return;
-  const text = sel.toString().trim();
-  if (!text) return;
+function createCommentFromSelection() {
+	var sel = window.getSelection();
+	if (!sel.rangeCount) return;
 
-  const range = sel.getRangeAt(0);
+	var range = sel.getRangeAt(0);
+	var text = sel.toString().trim();
+	if (!text) return;
 
-  // Find which block the selection is in
-  let node = range.startContainer;
-  let block = null;
-  while (node) {
-    if (node.nodeType === 1 && node.classList?.contains('block-wrapper')) {
-      block = node; break;
-    }
-    node = node.parentElement;
-  }
+	// Wrap selection in mark
+	var commentId = generateId();
+	var mark = document.createElement('mark');
+	mark.className = 'comment-mark';
+	mark.dataset.commentId = commentId;
 
-  // Generate a temp comment ID
-  const tempCommentId = 'pending_' + tempId();
+	try {
+		range.surroundContents(mark);
+	} catch (e) {
+		// Cross-element selection - wrap what we can
+		mark.textContent = text;
+		range.deleteContents();
+		range.insertNode(mark);
+	}
 
-  // Wrap selection in mark tag
-  try {
-    const mark = document.createElement('mark');
-    mark.className = 'comment-mark';
-    mark.dataset.commentId = tempCommentId;
-    range.surroundContents(mark);
-  } catch(e) {
-    // Cross-element selection - use extractContents approach
-    const frag = range.extractContents();
-    const mark = document.createElement('mark');
-    mark.className = 'comment-mark';
-    mark.dataset.commentId = tempCommentId;
-    mark.appendChild(frag);
-    range.insertNode(mark);
-  }
+	document.getElementById('comment-float-btn').style.display = 'none';
 
-  $('#floating-comment-btn').style.display = 'none';
-  sel.removeAllRanges();
+	// Find which block the comment is in
+	var wrapper = getBlockWrapper(mark);
+	var blockId = wrapper ? wrapper.dataset.blockId : null;
 
-  pendingCommentData = {
-    highlightedText: text,
-    blockId: block?.dataset.blockId || null,
-    tempCommentId,
-  };
+	// Show comments panel and insert form after comments load
+	document.getElementById('comments-panel').style.display = 'flex';
+	document.getElementById('shares-panel').style.display = 'none';
+	scheduleAutoSave();
 
-  showCommentsSidebar();
-  showNewCommentBox(text);
+	var insertForm = function() {
+		var list = document.getElementById('comments-list');
+		// Remove any existing new-comment-form
+		var existing = list.querySelector('.new-comment-form');
+		if (existing) existing.remove();
+		var formDiv = document.createElement('div');
+	formDiv.className = 'comment-thread new-comment-form';
+	formDiv.innerHTML = '<div style="font-size:12px;color:#999;margin-bottom:4px">Commenting on: <em>"' + escapeHtml(text.substring(0, 50)) + (text.length > 50 ? '...' : '') + '"</em></div>';
+	var textarea = document.createElement('textarea');
+	textarea.placeholder = 'Write a comment...';
+	textarea.style.cssText = 'width:100%;min-height:60px;margin-bottom:6px;padding:6px;border:1px solid #ddd;border-radius:4px;font-size:13px;resize:vertical;';
+	formDiv.appendChild(textarea);
+	var btnRow = document.createElement('div');
+	btnRow.style.cssText = 'display:flex;gap:6px;justify-content:flex-end;';
+	var cancelBtn = document.createElement('button');
+	cancelBtn.textContent = 'Cancel';
+	cancelBtn.style.cssText = 'padding:4px 10px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;';
+	cancelBtn.addEventListener('click', function() {
+		formDiv.remove();
+		var parent = mark.parentNode;
+		while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+		parent.removeChild(mark);
+		scheduleAutoSave();
+	});
+	var submitBtn = document.createElement('button');
+	submitBtn.textContent = 'Comment';
+	submitBtn.style.cssText = 'padding:4px 10px;border:none;border-radius:4px;background:#2eaadc;color:#fff;cursor:pointer;font-size:12px;';
+	submitBtn.addEventListener('click', function() {
+		var commentText = textarea.value.trim();
+		if (!commentText) return;
+		formDiv.remove();
+		api('POST', '/api/pages/' + currentPageId + '/comments', {
+			block_id: blockId,
+			highlighted_text: text,
+			content: commentText
+		}).then(function(comment) {
+			if (comment && comment.id) {
+				// Find mark by client ID (may have been re-rendered)
+				var m = document.querySelector('mark[data-comment-id="' + commentId + '"]') || mark;
+				m.dataset.commentId = comment.id;
+				scheduleAutoSave();
+			}
+			loadComments();
+		});
+	});
+	btnRow.appendChild(cancelBtn);
+	btnRow.appendChild(submitBtn);
+	formDiv.appendChild(btnRow);
+	list.insertBefore(formDiv, list.firstChild);
+	textarea.focus();
+	};
+
+	// Load comments first, then insert form on top
+	api('GET', '/api/pages/' + currentPageId + '/comments').then(function(comments) {
+		allComments = comments;
+		renderComments();
+		insertForm();
+	});
 }
 
-function showNewCommentBox(quote, parentCommentId) {
-  const box = $('#new-comment-box');
-  box.style.display = 'block';
-  $('#new-comment-quote').textContent = quote || '';
-  $('#new-comment-input').value = '';
-  $('#new-comment-input').dataset.parentCommentId = parentCommentId || '';
-  setTimeout(() => $('#new-comment-input').focus(), 50);
+function applyCommentHighlights() {
+	// Apply text-match highlights for comments that don't already have a mark in the DOM
+	allComments.forEach(function(c) {
+		if (c.highlighted_text && !c.resolved && !document.querySelector('mark.comment-mark[data-comment-id="' + c.id + '"]')) {
+			var container = document.getElementById('blocks-container');
+			var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+			var node;
+			while ((node = walker.nextNode())) {
+				var idx = node.textContent.indexOf(c.highlighted_text);
+				if (idx !== -1) {
+					var range = document.createRange();
+					range.setStart(node, idx);
+					range.setEnd(node, idx + c.highlighted_text.length);
+					var mark = document.createElement('mark');
+					mark.className = 'comment-mark';
+					mark.dataset.commentId = c.id;
+					try { range.surroundContents(mark); } catch (e) {}
+					break;
+				}
+			}
+		}
+	});
 }
 
-function cancelComment() {
-  $('#new-comment-box').style.display = 'none';
-  // Remove pending mark if exists
-  if (pendingCommentData?.tempCommentId) {
-    const mark = $(`mark[data-comment-id="${pendingCommentData.tempCommentId}"]`);
-    if (mark) {
-      const parent = mark.parentNode;
-      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-      mark.remove();
-    }
-  }
-  pendingCommentData = null;
+// ---- Shares ----
+function toggleSharesPanel() {
+	var panel = document.getElementById('shares-panel');
+	if (panel.style.display !== 'none') {
+		panel.style.display = 'none';
+	} else {
+		panel.style.display = 'flex';
+		document.getElementById('comments-panel').style.display = 'none';
+		loadShares();
+	}
 }
 
-async function submitComment() {
-  const content = $('#new-comment-input').value.trim();
-  if (!content) return;
-  const parentCommentId = $('#new-comment-input').dataset.parentCommentId || null;
-
-  const body = {
-    content,
-    highlighted_text: pendingCommentData?.highlightedText || '',
-    block_id: pendingCommentData?.blockId || null,
-    parent_comment_id: parentCommentId || null,
-  };
-
-  const comment = await api('POST', `/api/pages/${currentPageId}/comments`, body);
-  if (!comment) return;
-
-  // Update the mark tag with the real comment ID
-  if (pendingCommentData?.tempCommentId) {
-    const mark = $(`mark[data-comment-id="${pendingCommentData.tempCommentId}"]`);
-    if (mark) {
-      mark.dataset.commentId = comment.id;
-    }
-  }
-
-  pendingCommentData = null;
-  $('#new-comment-box').style.display = 'none';
-
-  // Save blocks to persist the mark tags
-  scheduleAutoSave();
-  loadComments();
-}
-
-// --- Comments Sidebar ---
-function toggleCommentsSidebar() {
-  const sidebar = $('#comments-sidebar');
-  if (sidebar.style.display === 'none') {
-    showCommentsSidebar();
-  } else {
-    sidebar.style.display = 'none';
-  }
-}
-
-function showCommentsSidebar() {
-  $('#comments-sidebar').style.display = 'flex';
-  loadComments();
-}
-
-async function loadComments() {
-  if (!currentPageId) return;
-  const comments = await api('GET', `/api/pages/${currentPageId}/comments`);
-  if (!comments) return;
-  renderComments(comments);
-}
-
-function renderComments(comments) {
-  const list = $('#comments-list');
-  list.innerHTML = '';
-
-  // Group into threads (top-level comments with replies)
-  const threads = [];
-  const replyMap = {};
-  comments.forEach(c => {
-    if (!c.parent_comment_id) {
-      threads.push(c);
-    } else {
-      if (!replyMap[c.parent_comment_id]) replyMap[c.parent_comment_id] = [];
-      replyMap[c.parent_comment_id].push(c);
-    }
-  });
-
-  if (threads.length === 0) {
-    list.innerHTML = '<div style="padding:16px;color:var(--color-text-muted);font-size:13px;">No comments yet</div>';
-    return;
-  }
-
-  threads.forEach(thread => {
-    const threadEl = document.createElement('div');
-    threadEl.className = 'comment-thread' + (thread.resolved ? ' resolved' : '');
-    threadEl.dataset.commentId = thread.id;
-
-    // Top-level comment
-    threadEl.appendChild(createCommentItemEl(thread, true));
-
-    // Replies
-    const replies = replyMap[thread.id] || [];
-    replies.forEach(reply => {
-      threadEl.appendChild(createCommentItemEl(reply, false));
-    });
-
-    list.appendChild(threadEl);
-  });
-}
-
-function createCommentItemEl(comment, isTopLevel) {
-  const div = document.createElement('div');
-  div.className = 'comment-item' + (isTopLevel ? '' : ' reply');
-  div.dataset.commentId = comment.id;
-
-  let html = '';
-  if (comment.highlighted_text && isTopLevel) {
-    html += `<div class="comment-quote">"${escHtml(comment.highlighted_text)}"</div>`;
-  }
-  html += `<div class="comment-author">${escHtml(comment.author_name)}</div>`;
-  html += `<div class="comment-text">${escHtml(comment.content)}</div>`;
-  html += `<div class="comment-meta">${formatDate(comment.created_at)}</div>`;
-
-  if (isTopLevel) {
-    html += '<div class="comment-actions">';
-    html += `<button class="comment-action-btn" onclick="replyToComment('${comment.id}')">Reply</button>`;
-    if (!comment.resolved) {
-      html += `<button class="comment-action-btn" onclick="resolveComment('${comment.id}')">Resolve</button>`;
-    }
-    html += '</div>';
-  }
-
-  div.innerHTML = html;
-  return div;
-}
-
-function highlightCommentInSidebar(commentId) {
-  const el = $(`.comment-thread[data-comment-id="${commentId}"], .comment-item[data-comment-id="${commentId}"]`);
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.classList.add('highlight-flash');
-    setTimeout(() => el.classList.remove('highlight-flash'), 1500);
-  }
-}
-
-window.replyToComment = function(parentId) {
-  pendingCommentData = { highlightedText: '', blockId: null, tempCommentId: null };
-  showNewCommentBox('', parentId);
-};
-
-window.resolveComment = async function(commentId) {
-  await api('PUT', `/api/comments/${commentId}/resolve`);
-  // Remove the mark tag for resolved comments
-  const mark = $(`mark[data-comment-id="${commentId}"]`);
-  if (mark) {
-    const parent = mark.parentNode;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    mark.remove();
-    scheduleAutoSave();
-  }
-  loadComments();
-};
-
-// --- Share Modal ---
-function openShareModal() {
-  $('#share-modal').style.display = 'flex';
-  loadShares();
-}
-
-async function loadShares() {
-  if (!currentPageId) return;
-  const shares = await api('GET', `/api/pages/${currentPageId}/shares`);
-  if (!shares) return;
-  renderShares(shares);
+function loadShares() {
+	if (!currentPageId) return;
+	api('GET', '/api/pages/' + currentPageId + '/shares').then(renderShares);
 }
 
 function renderShares(shares) {
-  const list = $('#shares-list');
-  list.innerHTML = '';
-  if (shares.length === 0) {
-    list.innerHTML = '<div style="padding:8px 0;color:var(--color-text-muted);font-size:13px;">No share links yet</div>';
-    return;
-  }
-  shares.forEach(s => {
-    const div = document.createElement('div');
-    div.className = 'share-item';
-    const link = window.location.origin + '/shared/' + s.token;
-    div.innerHTML = `
-      <div class="share-info">
-        <div class="share-alias">${escHtml(s.alias)}
-          <span class="share-badge">${s.can_comment ? 'Can comment' : 'View only'}</span>
-        </div>
-        <div class="share-link"><a href="${link}" target="_blank">${link}</a></div>
-      </div>
-      <button class="share-delete-btn" onclick="deleteShare('${s.id}')">&times;</button>
-    `;
-    list.appendChild(div);
-  });
+	var list = document.getElementById('shares-list');
+	list.innerHTML = '';
+
+	shares.forEach(function(s) {
+		var div = document.createElement('div');
+		div.className = 'share-item';
+
+		var info = document.createElement('div');
+		info.className = 'share-info';
+		info.innerHTML = '<div class="share-alias">' + escapeHtml(s.alias) + '</div><div class="share-type">' + s.key_type + '</div>';
+		div.appendChild(info);
+
+		var link = document.createElement('span');
+		link.className = 'share-link';
+		var url = window.location.origin + '/shared/' + s.token;
+		link.textContent = url;
+		link.title = 'Click to copy';
+		link.addEventListener('click', function() {
+			navigator.clipboard.writeText(url);
+			link.textContent = 'Copied!';
+			setTimeout(function() { link.textContent = url; }, 2000);
+		});
+		div.appendChild(link);
+
+		var del = document.createElement('button');
+		del.className = 'share-delete';
+		del.textContent = '✕';
+		del.addEventListener('click', function() {
+			api('DELETE', '/api/shares/' + s.id).then(loadShares);
+		});
+		div.appendChild(del);
+
+		list.appendChild(div);
+	});
 }
 
-async function createShare() {
-  const alias = $('#share-alias').value.trim();
-  if (!alias) return;
-  const canComment = $('#share-can-comment').checked ? 1 : 0;
-  await api('POST', `/api/pages/${currentPageId}/shares`, { alias, can_comment: canComment });
-  $('#share-alias').value = '';
-  loadShares();
+function createShare() {
+	if (!currentPageId) return;
+	var alias = document.getElementById('share-alias').value.trim() || 'Anonymous';
+	var keyType = document.getElementById('share-key-type').value;
+	api('POST', '/api/pages/' + currentPageId + '/shares', { alias: alias, key_type: keyType })
+		.then(function() {
+			document.getElementById('share-alias').value = '';
+			loadShares();
+		});
 }
 
-window.deleteShare = async function(id) {
-  await api('DELETE', `/api/shares/${id}`);
-  loadShares();
-};
+// ---- Code highlighting ----
+function highlightCodeBlocks() {
+	if (typeof hljs === 'undefined') return;
 
-// --- Utilities ---
-function escHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = s;
-  return div.innerHTML;
+	document.querySelectorAll('#blocks-container .code-block-wrapper code').forEach(function(code) {
+		var wrapper = getBlockWrapper(code);
+		var lang = wrapper ? wrapper.querySelector('.code-language') : null;
+		var langVal = lang ? lang.value : '';
+		var text = code.innerText;
+		if (!text.trim()) return;
+
+		// Save cursor position using innerText offset
+		var sel = window.getSelection();
+		var cursorOffset = -1;
+		if (sel.rangeCount && code.contains(sel.anchorNode)) {
+			// Use a temporary marker to find cursor position in innerText
+			var savedRange = sel.getRangeAt(0).cloneRange();
+			savedRange.collapse(true);
+			var marker = document.createTextNode('\u200B');
+			savedRange.insertNode(marker);
+			var fullText = code.innerText;
+			cursorOffset = fullText.indexOf('\u200B');
+			marker.parentNode.removeChild(marker);
+			// Re-read text without marker
+			text = code.innerText;
+		}
+
+		if (!text.trim()) return;
+
+		try {
+			var result = langVal
+				? hljs.highlight(text, { language: langVal })
+				: hljs.highlightAuto(text);
+			code.innerHTML = result.value;
+		} catch (e) { return; }
+
+		// Restore cursor position
+		if (cursorOffset >= 0) {
+			var walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+			var node, charCount = 0;
+			while ((node = walker.nextNode())) {
+				if (charCount + node.textContent.length >= cursorOffset) {
+					var newRange = document.createRange();
+					newRange.setStart(node, cursorOffset - charCount);
+					newRange.collapse(true);
+					sel.removeAllRanges();
+					sel.addRange(newRange);
+					break;
+				}
+				charCount += node.textContent.length;
+			}
+		}
+	});
 }
 
-function formatDate(dateStr) {
-  try {
-    const d = new Date(dateStr + (dateStr.includes('Z') ? '' : 'Z'));
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return dateStr;
-  }
+// ---- Math rendering ----
+function renderMathBlocks() {
+	document.querySelectorAll('#blocks-container .math-block').forEach(function(mathDiv) {
+		renderSingleMath(mathDiv);
+	});
 }
+
+function renderSingleMath(mathDiv) {
+	if (typeof katex === 'undefined') return;
+	var input = mathDiv.querySelector('.math-input');
+	var preview = mathDiv.querySelector('.math-preview');
+	if (!input || !preview) return;
+
+	var latex = input.textContent.trim();
+	if (!latex) {
+		preview.textContent = 'Empty equation';
+		preview.style.color = '#999';
+		return;
+	}
+	try {
+		katex.render(latex, preview, { throwOnError: false, displayMode: true });
+		preview.style.color = '';
+	} catch (e) {
+		preview.textContent = latex;
+		preview.style.color = '#999';
+	}
+}
+
+// ---- Polling ----
+function startPolling() {
+	pollTimer = setInterval(function() {
+		if (!currentPageId) return;
+		if (autoSaveTimer) return; // Skip if pending save
+		var container = document.getElementById('blocks-container');
+		if (document.activeElement && (document.activeElement === container || container.contains(document.activeElement))) return; // Skip if user has focus
+
+		api('GET', '/api/pages/' + currentPageId + '/blocks').then(function(blocks) {
+			api('GET', '/api/pages/' + currentPageId + '/comments').then(function(comments) {
+				allComments = comments;
+				// Don't re-render comments if user is writing a new comment
+				if (!document.querySelector('.new-comment-form')) {
+					renderComments();
+				}
+				renderBlocks(blocks);
+			});
+		}).catch(function() {}); // Ignore poll errors
+
+		// Refresh page list too
+		loadPages();
+	}, 3000);
+}
+
+// ---- Helpers ----
+function formatTime(dateStr) {
+	if (!dateStr) return '';
+	var d = new Date(dateStr.replace(' ', 'T') + 'Z');
+	if (isNaN(d.getTime())) return '';
+	var now = new Date();
+	var diff = now - d;
+	if (diff < 60000) return 'just now';
+	if (diff < 3600000) return Math.floor(diff / 60000) + ' minutes ago';
+	if (diff < 86400000) return Math.floor(diff / 3600000) + ' hours ago';
+	var days = Math.floor(diff / 86400000);
+	if (days === 1) return 'yesterday';
+	if (days < 30) return days + ' days ago';
+	return d.toLocaleDateString();
+}
+
+// ---- Start ----
+document.addEventListener('DOMContentLoaded', init);
+
+})();

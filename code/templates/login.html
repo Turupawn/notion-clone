@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login - Notion Clone</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<div id="login-screen">
+<div id="login-box">
+<h2>Notion Clone</h2>
+<p>Enter your admin key to continue</p>
+<input type="password" id="login-key" placeholder="Admin key" autofocus>
+<button id="login-btn" onclick="doLogin()">Login</button>
+<div id="login-error" style="display:none;color:#e74c3c;margin-top:8px"></div>
+</div>
+</div>
+<script>
+document.getElementById('login-key').addEventListener('keydown', function(e) {
+	if (e.key === 'Enter') doLogin();
+});
+function doLogin() {
+	var key = document.getElementById('login-key').value;
+	fetch('/login', {
+		method: 'POST',
+		headers: {'Content-Type': 'application/json'},
+		body: JSON.stringify({key: key})
+	}).then(function(r) {
+		if (r.ok) { window.location.reload(); }
+		else {
+			document.getElementById('login-error').style.display = 'block';
+			document.getElementById('login-error').textContent = 'Invalid key';
+		}
+	});
+}
+</script>
+</body>
+</html>

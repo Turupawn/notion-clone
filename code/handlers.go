@@ -1,348 +1,443 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-func jsonResponse(w http.ResponseWriter, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+// ---- Auth middleware ----
+
+func (a *App) adminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-Admin-Key")
+		if key == "" {
+			cookie, err := r.Cookie("admin_key")
+			if err == nil {
+				key = cookie.Value
+			}
+		}
+		if key != a.adminKey {
+			if r.URL.Path == "/" {
+				a.serveLoginPage(w)
+				return
+			}
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
-func jsonError(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Key != a.adminKey {
+		http.Error(w, `{"error":"invalid key"}`, http.StatusUnauthorized)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "admin_key",
+		Value:    body.Key,
+		Path:     "/",
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400 * 365,
+	})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// Pages
+// ---- HTML pages ----
 
-func listPagesHandler(w http.ResponseWriter, r *http.Request) {
-	pages, err := dbListPages()
+func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	a.serveAdminPage(w)
+}
+
+func (a *App) handleSharedPage(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	share, err := a.getShareByToken(token)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
+		http.Error(w, "Share not found", http.StatusNotFound)
+		return
+	}
+	page, err := a.getPage(share.PageID)
+	if err != nil {
+		http.Error(w, "Page not found", http.StatusNotFound)
+		return
+	}
+	a.serveSharedPage(w, page, share)
+}
+
+// ---- API: Pages ----
+
+func (a *App) handleListPages(w http.ResponseWriter, r *http.Request) {
+	pages, err := a.listPages()
+	if err != nil {
+		serverError(w, err)
 		return
 	}
 	if pages == nil {
 		pages = []Page{}
 	}
-	jsonResponse(w, pages)
+	writeJSON(w, pages)
 }
 
-func createPageHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+func (a *App) handleCreatePage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Title    string  `json:"title"`
+		ParentID *string `json:"parent_id"`
+		Icon     string  `json:"icon"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Title == "" {
+		body.Title = "Untitled"
+	}
+	page, err := a.createPage(body.Title, body.ParentID, body.Icon)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, page)
+}
+
+func (a *App) handleUpdatePage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
 		Title string `json:"title"`
 		Icon  string `json:"icon"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	page, err := dbCreatePage(req.Title, req.Icon)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(201)
-	jsonResponse(w, page)
+	if err := a.updatePage(id, body.Title, body.Icon); err != nil {
+		serverError(w, err)
+		return
+	}
+	page, _ := a.getPage(id)
+	writeJSON(w, page)
 }
 
-func getPageHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleDeletePage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	page, err := dbGetPage(id)
-	if err == sql.ErrNoRows {
-		jsonError(w, "page not found", 404)
+	if err := a.deletePage(id); err != nil {
+		serverError(w, err)
 		return
 	}
-	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
 
-	blocks, err := dbGetBlocks(id)
+func (a *App) handleMovePage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		ParentID *string `json:"parent_id"`
+		Position int     `json:"position"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.movePage(id, body.ParentID, body.Position); err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// ---- API: Blocks ----
+
+func (a *App) handleGetBlocks(w http.ResponseWriter, r *http.Request) {
+	pageID := r.PathValue("id")
+	blocks, err := a.getBlocks(pageID)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
+		serverError(w, err)
 		return
 	}
 	if blocks == nil {
 		blocks = []Block{}
 	}
-
-	jsonResponse(w, map[string]any{
-		"page":   page,
-		"blocks": blocks,
-	})
+	writeJSON(w, blocks)
 }
 
-func updatePageHandler(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var req struct {
-		Title      string `json:"title"`
-		Icon       string `json:"icon"`
-		CoverImage string `json:"cover_image"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if err := dbUpdatePage(id, req.Title, req.Icon, req.CoverImage); err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	page, _ := dbGetPage(id)
-	jsonResponse(w, page)
-}
-
-func deletePageHandler(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := dbDeletePage(id); err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	jsonResponse(w, map[string]bool{"ok": true})
-}
-
-// Blocks
-
-func saveBlocksHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleSaveBlocks(w http.ResponseWriter, r *http.Request) {
 	pageID := r.PathValue("id")
-
-	var req struct {
-		Blocks []BlockInput `json:"blocks"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid JSON", 400)
+	var blocks []Block
+	if err := json.NewDecoder(r.Body).Decode(&blocks); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-
-	blocks, err := dbSaveBlocks(pageID, req.Blocks)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
+	if err := a.saveBlocks(pageID, blocks); err != nil {
+		serverError(w, err)
 		return
 	}
-	if blocks == nil {
-		blocks = []Block{}
-	}
-	jsonResponse(w, blocks)
+	page, _ := a.getPage(pageID)
+	writeJSON(w, page)
 }
 
-// Comments
+// ---- API: Shares ----
 
-func getCommentsHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleListShares(w http.ResponseWriter, r *http.Request) {
 	pageID := r.PathValue("id")
-	comments, err := dbGetComments(pageID)
+	shares, err := a.listShares(pageID)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	if comments == nil {
-		comments = []Comment{}
-	}
-	jsonResponse(w, comments)
-}
-
-func createCommentHandler(w http.ResponseWriter, r *http.Request) {
-	pageID := r.PathValue("id")
-	var req struct {
-		BlockID         *string `json:"block_id"`
-		HighlightedText string  `json:"highlighted_text"`
-		Content         string  `json:"content"`
-		ParentCommentID *string `json:"parent_comment_id"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if strings.TrimSpace(req.Content) == "" {
-		jsonError(w, "content is required", 400)
-		return
-	}
-
-	comment, err := dbCreateComment(pageID, req.BlockID, nil, "admin", req.HighlightedText, req.Content, req.ParentCommentID)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	w.WriteHeader(201)
-	jsonResponse(w, comment)
-}
-
-func resolveCommentHandler(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := dbResolveComment(id); err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	jsonResponse(w, map[string]bool{"ok": true})
-}
-
-// Shares
-
-func getSharesHandler(w http.ResponseWriter, r *http.Request) {
-	pageID := r.PathValue("id")
-	shares, err := dbGetShares(pageID)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
+		serverError(w, err)
 		return
 	}
 	if shares == nil {
 		shares = []Share{}
 	}
-	jsonResponse(w, shares)
+	writeJSON(w, shares)
 }
 
-func createShareHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 	pageID := r.PathValue("id")
-	var req struct {
-		Alias      string `json:"alias"`
-		CanComment int    `json:"can_comment"`
+	var body struct {
+		Alias   string `json:"alias"`
+		KeyType string `json:"key_type"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if strings.TrimSpace(req.Alias) == "" {
-		jsonError(w, "alias is required", 400)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-
-	share, err := dbCreateShare(pageID, req.Alias, req.CanComment)
+	if body.Alias == "" {
+		body.Alias = "Anonymous"
+	}
+	if body.KeyType == "" {
+		body.KeyType = "viewer"
+	}
+	share, err := a.createShare(pageID, body.Alias, body.KeyType)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
+		serverError(w, err)
 		return
 	}
-	w.WriteHeader(201)
-	jsonResponse(w, share)
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, share)
 }
 
-func deleteShareHandler(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := dbDeleteShare(id); err != nil {
-		jsonError(w, err.Error(), 500)
+	if err := a.deleteShare(id); err != nil {
+		serverError(w, err)
 		return
 	}
-	jsonResponse(w, map[string]bool{"ok": true})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// Shared page (no admin auth)
+// ---- API: Comments ----
 
-func getSharedPageHandler(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	share, err := dbGetShareByToken(token)
-	if err == sql.ErrNoRows {
-		jsonError(w, "invalid share link", 404)
-		return
-	}
+func (a *App) handleGetComments(w http.ResponseWriter, r *http.Request) {
+	pageID := r.PathValue("id")
+	comments, err := a.getComments(pageID)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-
-	page, err := dbGetPage(share.PageID)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-
-	blocks, err := dbGetBlocks(share.PageID)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-	if blocks == nil {
-		blocks = []Block{}
-	}
-
-	comments, err := dbGetComments(share.PageID)
-	if err != nil {
-		jsonError(w, err.Error(), 500)
+		serverError(w, err)
 		return
 	}
 	if comments == nil {
 		comments = []Comment{}
 	}
-
-	jsonResponse(w, map[string]any{
-		"page":     page,
-		"blocks":   blocks,
-		"comments": comments,
-		"share":    share,
-	})
+	writeJSON(w, comments)
 }
 
-func createSharedCommentHandler(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	share, err := dbGetShareByToken(token)
-	if err == sql.ErrNoRows {
-		jsonError(w, "invalid share link", 404)
-		return
-	}
-	if err != nil {
-		jsonError(w, err.Error(), 500)
-		return
-	}
-
-	if share.CanComment == 0 {
-		jsonError(w, "commenting not allowed", 403)
-		return
-	}
-
-	var req struct {
+func (a *App) handleCreateComment(w http.ResponseWriter, r *http.Request) {
+	pageID := r.PathValue("id")
+	var body struct {
 		BlockID         *string `json:"block_id"`
 		HighlightedText string  `json:"highlighted_text"`
-		Content         string  `json:"content"`
 		ParentCommentID *string `json:"parent_comment_id"`
+		Content         string  `json:"content"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if strings.TrimSpace(req.Content) == "" {
-		jsonError(w, "content is required", 400)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-
-	comment, err := dbCreateComment(share.PageID, req.BlockID, &share.ID, "share", req.HighlightedText, req.Content, req.ParentCommentID)
+	comment, err := a.createComment(pageID, body.BlockID, nil, body.ParentCommentID, "admin", body.HighlightedText, body.Content)
 	if err != nil {
-		jsonError(w, err.Error(), 500)
+		serverError(w, err)
 		return
 	}
-	w.WriteHeader(201)
-	jsonResponse(w, comment)
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, comment)
 }
 
-// Upload
+func (a *App) handleResolveComment(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := a.resolveComment(id); err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	r.ParseMultipartForm(32 << 20) // 32MB max
+// ---- API: Upload ----
+
+func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
+	a.processUpload(w, r)
+}
+
+func (a *App) processUpload(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(32 << 20) // 32MB
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		jsonError(w, "no file provided", 400)
+		http.Error(w, `{"error":"no file"}`, http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
+	// Generate unique filename
 	ext := filepath.Ext(header.Filename)
-	newName := generateID() + ext
-	dstPath := filepath.Join(uploadDir, newName)
+	name := fmt.Sprintf("%s_%d%s", generateID(), time.Now().UnixNano(), ext)
+	path := filepath.Join(a.uploadDir, name)
 
-	dst, err := os.Create(dstPath)
+	out, err := os.Create(path)
 	if err != nil {
-		jsonError(w, "failed to save file", 500)
+		serverError(w, err)
 		return
 	}
-	defer dst.Close()
+	defer out.Close()
 
-	if _, err := io.Copy(dst, file); err != nil {
-		jsonError(w, "failed to write file", 500)
+	if _, err = io.Copy(out, file); err != nil {
+		serverError(w, err)
 		return
 	}
 
-	jsonResponse(w, map[string]string{"src": "/uploads/" + newName})
+	writeJSON(w, map[string]string{
+		"src":      "/uploads/" + name,
+		"filename": header.Filename,
+	})
 }
 
-// HTML pages
+// ---- Shared API endpoints ----
 
-func serveIndex(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "static/index.html")
+func (a *App) handleSharedGetPage(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	share, err := a.getShareByToken(token)
+	if err != nil {
+		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		return
+	}
+	page, err := a.getPage(share.PageID)
+	if err != nil {
+		http.Error(w, `{"error":"page not found"}`, http.StatusNotFound)
+		return
+	}
+	blocks, _ := a.getBlocks(share.PageID)
+	if blocks == nil {
+		blocks = []Block{}
+	}
+	comments, _ := a.getComments(share.PageID)
+	if comments == nil {
+		comments = []Comment{}
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"page":     page,
+		"blocks":   blocks,
+		"comments": comments,
+		"share": map[string]string{
+			"key_type": share.KeyType,
+			"alias":    share.Alias,
+			"id":       share.ID,
+		},
+	})
 }
 
-func serveSharedHTML(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "static/shared.html")
+func (a *App) handleSharedCreateComment(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	share, err := a.getShareByToken(token)
+	if err != nil {
+		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		return
+	}
+	if share.KeyType != "commenter" && share.KeyType != "editor" {
+		http.Error(w, `{"error":"no comment access"}`, http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		BlockID         *string `json:"block_id"`
+		HighlightedText string  `json:"highlighted_text"`
+		ParentCommentID *string `json:"parent_comment_id"`
+		Content         string  `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+
+	comment, err := a.createComment(share.PageID, body.BlockID, &share.ID, body.ParentCommentID, "share", body.HighlightedText, body.Content)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, comment)
+}
+
+func (a *App) handleSharedSaveBlocks(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	share, err := a.getShareByToken(token)
+	if err != nil {
+		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		return
+	}
+	if share.KeyType != "editor" {
+		http.Error(w, `{"error":"no edit access"}`, http.StatusForbidden)
+		return
+	}
+
+	var blocks []Block
+	if err := json.NewDecoder(r.Body).Decode(&blocks); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := a.saveBlocks(share.PageID, blocks); err != nil {
+		serverError(w, err)
+		return
+	}
+	page, _ := a.getPage(share.PageID)
+	writeJSON(w, page)
+}
+
+func (a *App) handleSharedUpload(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	share, err := a.getShareByToken(token)
+	if err != nil {
+		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		return
+	}
+	if share.KeyType != "editor" {
+		http.Error(w, `{"error":"no upload access"}`, http.StatusForbidden)
+		return
+	}
+	_ = share
+	a.processUpload(w, r)
+}
+
+// ---- Helpers ----
+
+func writeJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func serverError(w http.ResponseWriter, err error) {
+	msg := strings.ReplaceAll(err.Error(), `"`, `\"`)
+	http.Error(w, fmt.Sprintf(`{"error":"%s"}`, msg), http.StatusInternalServerError)
 }

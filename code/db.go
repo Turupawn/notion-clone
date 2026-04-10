@@ -4,8 +4,66 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
+
+type App struct {
+	db        *sql.DB
+	adminKey  string
+	uploadDir string
+}
+
+type Page struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Icon      string  `json:"icon"`
+	CoverImg  string  `json:"cover_image"`
+	ParentID  *string `json:"parent_id"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	Position  int     `json:"position"`
+}
+
+type Block struct {
+	ID            string          `json:"id"`
+	PageID        string          `json:"page_id"`
+	Type          string          `json:"type"`
+	Content       string          `json:"content"`
+	Properties    json.RawMessage `json:"properties"`
+	Position      int             `json:"position"`
+	ParentBlockID *string         `json:"parent_block_id"`
+	CreatedAt     string          `json:"created_at"`
+	UpdatedAt     string          `json:"updated_at"`
+}
+
+type Share struct {
+	ID         string `json:"id"`
+	PageID     string `json:"page_id"`
+	Alias      string `json:"alias"`
+	Token      string `json:"token"`
+	CanComment int    `json:"can_comment"`
+	KeyType    string `json:"key_type"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type Comment struct {
+	ID              string  `json:"id"`
+	PageID          string  `json:"page_id"`
+	BlockID         *string `json:"block_id"`
+	ShareID         *string `json:"share_id"`
+	AuthorType      string  `json:"author_type"`
+	HighlightedText string  `json:"highlighted_text"`
+	ParentCommentID *string `json:"parent_comment_id"`
+	Resolved        int     `json:"resolved"`
+	Content         string  `json:"content"`
+	CreatedAt       string  `json:"created_at"`
+	Author          string  `json:"author"`
+}
 
 func generateID() string {
 	b := make([]byte, 16)
@@ -19,7 +77,14 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
-func initSchema(db *sql.DB) error {
+func initDB(path string) *sql.DB {
+	db, err := sql.Open("sqlite3", path+"?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on")
+	if err != nil {
+		log.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+
+	// Create tables if they don't exist
 	schema := `
 	CREATE TABLE IF NOT EXISTS pages (
 		id TEXT PRIMARY KEY,
@@ -28,7 +93,8 @@ func initSchema(db *sql.DB) error {
 		cover_image TEXT DEFAULT '',
 		parent_id TEXT REFERENCES pages(id) ON DELETE CASCADE,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		position INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE IF NOT EXISTS blocks (
 		id TEXT PRIMARY KEY,
@@ -49,6 +115,7 @@ func initSchema(db *sql.DB) error {
 		alias TEXT NOT NULL,
 		token TEXT NOT NULL UNIQUE,
 		can_comment INTEGER DEFAULT 1,
+		key_type TEXT NOT NULL DEFAULT 'viewer',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_shares_token ON shares(token);
@@ -68,14 +135,17 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_comments_page ON comments(page_id);
 	CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_comment_id);
 	`
-	_, err := db.Exec(schema)
-	return err
+	_, err = db.Exec(schema)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return db
 }
 
-// Pages
+// ---- Page operations ----
 
-func dbListPages() ([]Page, error) {
-	rows, err := db.Query("SELECT id, title, icon, cover_image, parent_id, created_at, updated_at FROM pages ORDER BY updated_at DESC")
+func (a *App) listPages() ([]Page, error) {
+	rows, err := a.db.Query("SELECT id, title, icon, cover_image, parent_id, created_at, updated_at, position FROM pages ORDER BY position ASC, updated_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +154,8 @@ func dbListPages() ([]Page, error) {
 	var pages []Page
 	for rows.Next() {
 		var p Page
-		if err := rows.Scan(&p.ID, &p.Title, &p.Icon, &p.CoverImage, &p.ParentID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		err := rows.Scan(&p.ID, &p.Title, &p.Icon, &p.CoverImg, &p.ParentID, &p.CreatedAt, &p.UpdatedAt, &p.Position)
+		if err != nil {
 			return nil, err
 		}
 		pages = append(pages, p)
@@ -92,155 +163,249 @@ func dbListPages() ([]Page, error) {
 	return pages, nil
 }
 
-func dbGetPage(id string) (*Page, error) {
+func (a *App) getPage(id string) (*Page, error) {
 	var p Page
-	err := db.QueryRow("SELECT id, title, icon, cover_image, parent_id, created_at, updated_at FROM pages WHERE id = ?", id).
-		Scan(&p.ID, &p.Title, &p.Icon, &p.CoverImage, &p.ParentID, &p.CreatedAt, &p.UpdatedAt)
+	err := a.db.QueryRow("SELECT id, title, icon, cover_image, parent_id, created_at, updated_at, position FROM pages WHERE id = ?", id).
+		Scan(&p.ID, &p.Title, &p.Icon, &p.CoverImg, &p.ParentID, &p.CreatedAt, &p.UpdatedAt, &p.Position)
 	if err != nil {
 		return nil, err
 	}
 	return &p, nil
 }
 
-func dbCreatePage(title, icon string) (*Page, error) {
+func (a *App) createPage(title string, parentID *string, icon string) (*Page, error) {
 	id := generateID()
-	if title == "" {
-		title = "Untitled"
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+
+	// Get max position for siblings
+	var maxPos int
+	if parentID != nil {
+		a.db.QueryRow("SELECT COALESCE(MAX(position), -1) FROM pages WHERE parent_id = ?", *parentID).Scan(&maxPos)
+	} else {
+		a.db.QueryRow("SELECT COALESCE(MAX(position), -1) FROM pages WHERE parent_id IS NULL").Scan(&maxPos)
 	}
-	_, err := db.Exec("INSERT INTO pages (id, title, icon) VALUES (?, ?, ?)", id, title, icon)
+
+	_, err := a.db.Exec("INSERT INTO pages (id, title, icon, parent_id, created_at, updated_at, position) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		id, title, icon, parentID, now, now, maxPos+1)
 	if err != nil {
 		return nil, err
 	}
-	return dbGetPage(id)
+
+	return a.getPage(id)
 }
 
-func dbUpdatePage(id, title, icon, coverImage string) error {
-	_, err := db.Exec("UPDATE pages SET title = ?, icon = ?, cover_image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-		title, icon, coverImage, id)
+func (a *App) updatePage(id, title, icon string) error {
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err := a.db.Exec("UPDATE pages SET title = ?, icon = ?, updated_at = ? WHERE id = ?", title, icon, now, id)
 	return err
 }
 
-func dbDeletePage(id string) error {
-	_, err := db.Exec("DELETE FROM pages WHERE id = ?", id)
+func (a *App) deletePage(id string) error {
+	_, err := a.db.Exec("DELETE FROM pages WHERE id = ?", id)
 	return err
 }
 
-// Blocks
+func (a *App) movePage(id string, parentID *string, position int) error {
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err := a.db.Exec("UPDATE pages SET parent_id = ?, position = ?, updated_at = ? WHERE id = ?", parentID, position, now, id)
+	if err != nil {
+		return err
+	}
+	// Reorder siblings
+	var siblings []string
+	var rows *sql.Rows
+	if parentID != nil {
+		rows, err = a.db.Query("SELECT id FROM pages WHERE parent_id = ? AND id != ? ORDER BY position ASC, updated_at DESC", *parentID, id)
+	} else {
+		rows, err = a.db.Query("SELECT id FROM pages WHERE parent_id IS NULL AND id != ? ORDER BY position ASC, updated_at DESC", id)
+	}
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sid string
+		rows.Scan(&sid)
+		siblings = append(siblings, sid)
+	}
 
-func dbGetBlocks(pageID string) ([]Block, error) {
-	rows, err := db.Query("SELECT id, page_id, type, content, properties, position, parent_block_id, created_at, updated_at FROM blocks WHERE page_id = ? ORDER BY position", pageID)
+	// Insert the moved page at the right position
+	result := make([]string, 0, len(siblings)+1)
+	inserted := false
+	for i, sid := range siblings {
+		if i == position && !inserted {
+			result = append(result, id)
+			inserted = true
+		}
+		result = append(result, sid)
+	}
+	if !inserted {
+		result = append(result, id)
+	}
+
+	for i, sid := range result {
+		a.db.Exec("UPDATE pages SET position = ? WHERE id = ?", i, sid)
+	}
+	return nil
+}
+
+// ---- Block operations ----
+
+func (a *App) getBlocks(pageID string) ([]Block, error) {
+	rows, err := a.db.Query("SELECT id, page_id, type, content, properties, position, parent_block_id, created_at, updated_at FROM blocks WHERE page_id = ? ORDER BY position ASC", pageID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var all []Block
+	var blocks []Block
 	for rows.Next() {
 		var b Block
-		if err := rows.Scan(&b.ID, &b.PageID, &b.Type, &b.Content, &b.Properties, &b.Position, &b.ParentBlockID, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		var props string
+		err := rows.Scan(&b.ID, &b.PageID, &b.Type, &b.Content, &props, &b.Position, &b.ParentBlockID, &b.CreatedAt, &b.UpdatedAt)
+		if err != nil {
 			return nil, err
 		}
-		all = append(all, b)
+		b.Properties = json.RawMessage(props)
+		blocks = append(blocks, b)
 	}
-
-	// Organize: top-level first, then children right after their parent
-	var topLevel []Block
-	children := make(map[string][]Block)
-	for _, b := range all {
-		if b.ParentBlockID == nil {
-			topLevel = append(topLevel, b)
-		} else {
-			children[*b.ParentBlockID] = append(children[*b.ParentBlockID], b)
-		}
-	}
-
-	var result []Block
-	for _, b := range topLevel {
-		result = append(result, b)
-		if kids, ok := children[b.ID]; ok {
-			result = append(result, kids...)
-		}
-	}
-	return result, nil
+	return blocks, nil
 }
 
-func dbSaveBlocks(pageID string, inputs []BlockInput) ([]Block, error) {
-	tx, err := db.Begin()
+func (a *App) saveBlocks(pageID string, blocks []Block) error {
+	tx, err := a.db.Begin()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer tx.Rollback()
 
-	// Delete existing blocks (comments.block_id will be SET NULL)
-	if _, err := tx.Exec("DELETE FROM blocks WHERE page_id = ?", pageID); err != nil {
-		return nil, fmt.Errorf("delete blocks: %w", err)
+	// Delete existing blocks
+	_, err = tx.Exec("DELETE FROM blocks WHERE page_id = ?", pageID)
+	if err != nil {
+		return err
 	}
 
-	// Generate new IDs and build mapping
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+
+	// Build old-to-new ID mapping and insert parents first
 	idMap := make(map[string]string)
-	for _, b := range inputs {
-		if b.ClientID != "" {
-			idMap[b.ClientID] = generateID()
+	for i := range blocks {
+		newID := generateID()
+		if blocks[i].ID != "" {
+			idMap[blocks[i].ID] = newID
 		}
+		blocks[i].ID = newID
 	}
 
-	// Insert top-level blocks first (no parent)
-	for _, b := range inputs {
-		if b.ParentClientID != "" {
+	// Insert blocks: parents first (those without parent_block_id), then children
+	// Two passes: first pass inserts blocks without parents, second pass inserts children
+	stmt, err := tx.Prepare("INSERT INTO blocks (id, page_id, type, content, properties, position, parent_block_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	// First pass: blocks without parent
+	for i, b := range blocks {
+		if b.ParentBlockID != nil {
 			continue
 		}
-		newID := idMap[b.ClientID]
-		if newID == "" {
-			newID = generateID()
+		props := string(b.Properties)
+		if props == "" {
+			props = "{}"
 		}
-		if _, err := tx.Exec(
-			"INSERT INTO blocks (id, page_id, type, content, properties, position) VALUES (?,?,?,?,?,?)",
-			newID, pageID, b.Type, b.Content, b.Properties, b.Position,
-		); err != nil {
-			return nil, fmt.Errorf("insert block: %w", err)
+		_, err = stmt.Exec(b.ID, pageID, b.Type, b.Content, props, i, nil, now, now)
+		if err != nil {
+			return fmt.Errorf("inserting block %s: %w", b.ID, err)
 		}
 	}
 
-	// Insert child blocks
-	for _, b := range inputs {
-		if b.ParentClientID == "" {
+	// Second pass: blocks with parent (remap parent IDs)
+	for i, b := range blocks {
+		if b.ParentBlockID == nil {
 			continue
 		}
-		newID := idMap[b.ClientID]
-		if newID == "" {
-			newID = generateID()
+		newParent, ok := idMap[*b.ParentBlockID]
+		if !ok {
+			newParent = *b.ParentBlockID // fallback
 		}
-		parentID := idMap[b.ParentClientID]
-		if parentID == "" {
-			continue // skip orphans
+		props := string(b.Properties)
+		if props == "" {
+			props = "{}"
 		}
-		if _, err := tx.Exec(
-			"INSERT INTO blocks (id, page_id, type, content, properties, position, parent_block_id) VALUES (?,?,?,?,?,?,?)",
-			newID, pageID, b.Type, b.Content, b.Properties, b.Position, parentID,
-		); err != nil {
-			return nil, fmt.Errorf("insert child block: %w", err)
+		_, err = stmt.Exec(b.ID, pageID, b.Type, b.Content, props, i, newParent, now, now)
+		if err != nil {
+			return fmt.Errorf("inserting child block %s: %w", b.ID, err)
 		}
 	}
 
-	// Update page timestamp
-	if _, err := tx.Exec("UPDATE pages SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", pageID); err != nil {
-		return nil, err
+	// Update page updated_at
+	_, err = tx.Exec("UPDATE pages SET updated_at = ? WHERE id = ?", now, pageID)
+	if err != nil {
+		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return dbGetBlocks(pageID)
+	return tx.Commit()
 }
 
-// Comments
+// ---- Share operations ----
 
-func dbGetComments(pageID string) ([]Comment, error) {
-	rows, err := db.Query(`
+func (a *App) listShares(pageID string) ([]Share, error) {
+	rows, err := a.db.Query("SELECT id, page_id, alias, token, can_comment, key_type, created_at FROM shares WHERE page_id = ?", pageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []Share
+	for rows.Next() {
+		var s Share
+		err := rows.Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.KeyType, &s.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		shares = append(shares, s)
+	}
+	return shares, nil
+}
+
+func (a *App) getShareByToken(token string) (*Share, error) {
+	var s Share
+	err := a.db.QueryRow("SELECT id, page_id, alias, token, can_comment, key_type, created_at FROM shares WHERE token = ?", token).
+		Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.KeyType, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (a *App) createShare(pageID, alias, keyType string) (*Share, error) {
+	id := generateID()
+	token := generateToken()
+	canComment := 0
+	if keyType == "commenter" || keyType == "editor" {
+		canComment = 1
+	}
+	_, err := a.db.Exec("INSERT INTO shares (id, page_id, alias, token, can_comment, key_type) VALUES (?, ?, ?, ?, ?, ?)",
+		id, pageID, alias, token, canComment, keyType)
+	if err != nil {
+		return nil, err
+	}
+	return a.getShareByToken(token)
+}
+
+func (a *App) deleteShare(id string) error {
+	_, err := a.db.Exec("DELETE FROM shares WHERE id = ?", id)
+	return err
+}
+
+// ---- Comment operations ----
+
+func (a *App) getComments(pageID string) ([]Comment, error) {
+	rows, err := a.db.Query(`
 		SELECT c.id, c.page_id, c.block_id, c.share_id, c.author_type, c.highlighted_text,
 			c.parent_comment_id, c.resolved, c.content, c.created_at,
-			COALESCE(s.alias, 'Admin') as author_name
+			COALESCE(s.alias, 'Admin') as author
 		FROM comments c
 		LEFT JOIN shares s ON c.share_id = s.id
 		WHERE c.page_id = ?
@@ -253,9 +418,9 @@ func dbGetComments(pageID string) ([]Comment, error) {
 	var comments []Comment
 	for rows.Next() {
 		var c Comment
-		if err := rows.Scan(&c.ID, &c.PageID, &c.BlockID, &c.ShareID, &c.AuthorType,
-			&c.HighlightedText, &c.ParentCommentID, &c.Resolved, &c.Content,
-			&c.CreatedAt, &c.AuthorName); err != nil {
+		err := rows.Scan(&c.ID, &c.PageID, &c.BlockID, &c.ShareID, &c.AuthorType, &c.HighlightedText,
+			&c.ParentCommentID, &c.Resolved, &c.Content, &c.CreatedAt, &c.Author)
+		if err != nil {
 			return nil, err
 		}
 		comments = append(comments, c)
@@ -263,86 +428,44 @@ func dbGetComments(pageID string) ([]Comment, error) {
 	return comments, nil
 }
 
-func dbCreateComment(pageID string, blockID *string, shareID *string, authorType, highlightedText, content string, parentCommentID *string) (*Comment, error) {
+func (a *App) createComment(pageID string, blockID, shareID, parentCommentID *string, authorType, highlightedText, content string) (*Comment, error) {
 	id := generateID()
-	_, err := db.Exec(`
-		INSERT INTO comments (id, page_id, block_id, share_id, author_type, highlighted_text, content, parent_comment_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, pageID, blockID, shareID, authorType, highlightedText, content, parentCommentID)
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+
+	// Verify block_id exists if provided
+	if blockID != nil && *blockID != "" {
+		var exists int
+		err := a.db.QueryRow("SELECT COUNT(*) FROM blocks WHERE id = ?", *blockID).Scan(&exists)
+		if err != nil || exists == 0 {
+			blockID = nil
+		}
+	}
+
+	_, err := a.db.Exec(`INSERT INTO comments (id, page_id, block_id, share_id, author_type, highlighted_text, parent_comment_id, content, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, pageID, blockID, shareID, authorType, highlightedText, parentCommentID, content, now)
 	if err != nil {
 		return nil, err
 	}
 
+	// Update page updated_at
+	a.db.Exec("UPDATE pages SET updated_at = ? WHERE id = ?", now, pageID)
+
 	var c Comment
-	err = db.QueryRow(`
+	err = a.db.QueryRow(`
 		SELECT c.id, c.page_id, c.block_id, c.share_id, c.author_type, c.highlighted_text,
 			c.parent_comment_id, c.resolved, c.content, c.created_at,
-			COALESCE(s.alias, 'Admin') as author_name
-		FROM comments c
-		LEFT JOIN shares s ON c.share_id = s.id
-		WHERE c.id = ?`, id).
-		Scan(&c.ID, &c.PageID, &c.BlockID, &c.ShareID, &c.AuthorType,
-			&c.HighlightedText, &c.ParentCommentID, &c.Resolved, &c.Content,
-			&c.CreatedAt, &c.AuthorName)
+			COALESCE(s.alias, 'Admin') as author
+		FROM comments c LEFT JOIN shares s ON c.share_id = s.id WHERE c.id = ?`, id).
+		Scan(&c.ID, &c.PageID, &c.BlockID, &c.ShareID, &c.AuthorType, &c.HighlightedText,
+			&c.ParentCommentID, &c.Resolved, &c.Content, &c.CreatedAt, &c.Author)
 	if err != nil {
 		return nil, err
 	}
 	return &c, nil
 }
 
-func dbResolveComment(id string) error {
-	_, err := db.Exec("UPDATE comments SET resolved = 1 WHERE id = ?", id)
+func (a *App) resolveComment(id string) error {
+	_, err := a.db.Exec("UPDATE comments SET resolved = 1 WHERE id = ? OR parent_comment_id = ?", id, id)
 	return err
-}
-
-// Shares
-
-func dbGetShares(pageID string) ([]Share, error) {
-	rows, err := db.Query("SELECT id, page_id, alias, token, can_comment, created_at FROM shares WHERE page_id = ?", pageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var shares []Share
-	for rows.Next() {
-		var s Share
-		if err := rows.Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.CreatedAt); err != nil {
-			return nil, err
-		}
-		shares = append(shares, s)
-	}
-	return shares, nil
-}
-
-func dbCreateShare(pageID, alias string, canComment int) (*Share, error) {
-	id := generateID()
-	token := generateToken()
-	_, err := db.Exec("INSERT INTO shares (id, page_id, alias, token, can_comment) VALUES (?, ?, ?, ?, ?)",
-		id, pageID, alias, token, canComment)
-	if err != nil {
-		return nil, err
-	}
-	var s Share
-	err = db.QueryRow("SELECT id, page_id, alias, token, can_comment, created_at FROM shares WHERE id = ?", id).
-		Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	return &s, nil
-}
-
-func dbDeleteShare(id string) error {
-	_, err := db.Exec("DELETE FROM shares WHERE id = ?", id)
-	return err
-}
-
-func dbGetShareByToken(token string) (*Share, error) {
-	var s Share
-	err := db.QueryRow("SELECT id, page_id, alias, token, can_comment, created_at FROM shares WHERE token = ?", token).
-		Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	return &s, nil
 }

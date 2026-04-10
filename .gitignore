@@ -3,3 +3,4 @@ notion-clone
 *.db-wal
 *.db-shm
 .claude/
+Export-*/

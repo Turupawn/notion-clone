@@ -1,22 +1,13 @@
 package main
 
 import (
-	"database/sql"
 	"log"
 	"net/http"
 	"os"
-
-	_ "github.com/mattn/go-sqlite3"
-)
-
-var (
-	db        *sql.DB
-	adminKey  string
-	uploadDir string
 )
 
 func main() {
-	adminKey = os.Getenv("ADMIN_KEY")
+	adminKey := os.Getenv("ADMIN_KEY")
 	if adminKey == "" {
 		log.Fatal("ADMIN_KEY environment variable is required")
 	}
@@ -31,54 +22,63 @@ func main() {
 		dbPath = "../data/data.db"
 	}
 
-	uploadDir = os.Getenv("UPLOAD_DIR")
+	uploadDir := os.Getenv("UPLOAD_DIR")
 	if uploadDir == "" {
 		uploadDir = "../data/uploads"
 	}
 
 	os.MkdirAll(uploadDir, 0755)
 
-	var err error
-	db, err = sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_foreign_keys=on")
-	if err != nil {
-		log.Fatal(err)
-	}
+	db := initDB(dbPath)
 	defer db.Close()
-	db.SetMaxOpenConns(1)
 
-	if err := initSchema(db); err != nil {
-		log.Fatal("schema init:", err)
+	app := &App{
+		db:        db,
+		adminKey:  adminKey,
+		uploadDir: uploadDir,
 	}
 
 	mux := http.NewServeMux()
 
-	// Admin API
-	mux.Handle("GET /api/pages", adminOnly(http.HandlerFunc(listPagesHandler)))
-	mux.Handle("POST /api/pages", adminOnly(http.HandlerFunc(createPageHandler)))
-	mux.Handle("GET /api/pages/{id}", adminOnly(http.HandlerFunc(getPageHandler)))
-	mux.Handle("PUT /api/pages/{id}", adminOnly(http.HandlerFunc(updatePageHandler)))
-	mux.Handle("DELETE /api/pages/{id}", adminOnly(http.HandlerFunc(deletePageHandler)))
-	mux.Handle("PUT /api/pages/{id}/blocks", adminOnly(http.HandlerFunc(saveBlocksHandler)))
-	mux.Handle("GET /api/pages/{id}/comments", adminOnly(http.HandlerFunc(getCommentsHandler)))
-	mux.Handle("POST /api/pages/{id}/comments", adminOnly(http.HandlerFunc(createCommentHandler)))
-	mux.Handle("PUT /api/comments/{id}/resolve", adminOnly(http.HandlerFunc(resolveCommentHandler)))
-	mux.Handle("GET /api/pages/{id}/shares", adminOnly(http.HandlerFunc(getSharesHandler)))
-	mux.Handle("POST /api/pages/{id}/shares", adminOnly(http.HandlerFunc(createShareHandler)))
-	mux.Handle("DELETE /api/shares/{id}", adminOnly(http.HandlerFunc(deleteShareHandler)))
-	mux.Handle("POST /api/upload", adminOnly(http.HandlerFunc(uploadHandler)))
-
-	// Public shared page API
-	mux.HandleFunc("GET /api/shared/{token}", getSharedPageHandler)
-	mux.HandleFunc("POST /api/shared/{token}/comments", createSharedCommentHandler)
-
-	// Static files
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
-	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
-
 	// HTML pages
-	mux.HandleFunc("GET /shared/{token}", serveSharedHTML)
-	mux.HandleFunc("GET /{$}", serveIndex)
+	mux.HandleFunc("GET /", app.adminAuth(app.handleAdminPage))
+	mux.HandleFunc("POST /login", app.handleLogin)
+	mux.HandleFunc("GET /shared/{token}", app.handleSharedPage)
 
-	log.Printf("Listening on :%s", port)
+	// Static files (served from disk so changes don't require recompilation)
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
+
+	// API - pages (admin)
+	mux.HandleFunc("GET /api/pages", app.adminAuth(app.handleListPages))
+	mux.HandleFunc("POST /api/pages", app.adminAuth(app.handleCreatePage))
+	mux.HandleFunc("PUT /api/pages/{id}", app.adminAuth(app.handleUpdatePage))
+	mux.HandleFunc("DELETE /api/pages/{id}", app.adminAuth(app.handleDeletePage))
+	mux.HandleFunc("PUT /api/pages/{id}/move", app.adminAuth(app.handleMovePage))
+
+	// API - blocks (admin)
+	mux.HandleFunc("GET /api/pages/{id}/blocks", app.adminAuth(app.handleGetBlocks))
+	mux.HandleFunc("PUT /api/pages/{id}/blocks", app.adminAuth(app.handleSaveBlocks))
+
+	// API - shares (admin)
+	mux.HandleFunc("GET /api/pages/{id}/shares", app.adminAuth(app.handleListShares))
+	mux.HandleFunc("POST /api/pages/{id}/shares", app.adminAuth(app.handleCreateShare))
+	mux.HandleFunc("DELETE /api/shares/{id}", app.adminAuth(app.handleDeleteShare))
+
+	// API - comments (admin)
+	mux.HandleFunc("GET /api/pages/{id}/comments", app.adminAuth(app.handleGetComments))
+	mux.HandleFunc("POST /api/pages/{id}/comments", app.adminAuth(app.handleCreateComment))
+	mux.HandleFunc("PUT /api/comments/{id}/resolve", app.adminAuth(app.handleResolveComment))
+
+	// API - upload (admin)
+	mux.HandleFunc("POST /api/upload", app.adminAuth(app.handleUpload))
+
+	// API - shared endpoints
+	mux.HandleFunc("GET /api/shared/{token}/page", app.handleSharedGetPage)
+	mux.HandleFunc("POST /api/shared/{token}/comments", app.handleSharedCreateComment)
+	mux.HandleFunc("PUT /api/shared/{token}/blocks", app.handleSharedSaveBlocks)
+	mux.HandleFunc("POST /api/shared/{token}/upload", app.handleSharedUpload)
+
+	log.Printf("Server starting on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }

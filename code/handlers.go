@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,16 +15,23 @@ import (
 
 // ---- Auth middleware ----
 
+func (a *App) isAdmin(r *http.Request) bool {
+	key := r.Header.Get("X-Admin-Key")
+	if key == "" {
+		cookie, err := r.Cookie("admin_key")
+		if err == nil {
+			key = cookie.Value
+		}
+	}
+	if len(key) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(key), []byte(a.adminKey)) == 1
+}
+
 func (a *App) adminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("X-Admin-Key")
-		if key == "" {
-			cookie, err := r.Cookie("admin_key")
-			if err == nil {
-				key = cookie.Value
-			}
-		}
-		if key != a.adminKey {
+		if !a.isAdmin(r) {
 			if r.URL.Path == "/" {
 				a.serveLoginPage(w)
 				return
@@ -42,14 +51,17 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	if body.Key != a.adminKey {
+	if subtle.ConstantTimeCompare([]byte(body.Key), []byte(a.adminKey)) != 1 {
 		http.Error(w, `{"error":"invalid key"}`, http.StatusUnauthorized)
 		return
 	}
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "admin_key",
 		Value:    body.Key,
 		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400 * 365,
 	})
@@ -219,7 +231,9 @@ func (a *App) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 	if body.Alias == "" {
 		body.Alias = "Anonymous"
 	}
-	if body.KeyType == "" {
+	switch body.KeyType {
+	case "viewer", "commenter", "editor":
+	default:
 		body.KeyType = "viewer"
 	}
 	share, err := a.createShare(pageID, body.Alias, body.KeyType)
@@ -287,12 +301,21 @@ func (a *App) handleResolveComment(w http.ResponseWriter, r *http.Request) {
 
 // ---- API: Upload ----
 
-func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
-	a.processUpload(w, r)
+var safeImageExts = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".avif": true,
 }
 
-func (a *App) processUpload(w http.ResponseWriter, r *http.Request) {
-	r.ParseMultipartForm(32 << 20) // 32MB
+func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
+	pageID := r.PathValue("id")
+	a.processUpload(w, r, pageID)
+}
+
+func (a *App) processUpload(w http.ResponseWriter, r *http.Request, pageID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 250<<20) // 250MB
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, `{"error":"file too large"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, `{"error":"no file"}`, http.StatusBadRequest)
@@ -300,12 +323,28 @@ func (a *App) processUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Generate unique filename
-	ext := filepath.Ext(header.Filename)
-	name := fmt.Sprintf("%s_%d%s", generateID(), time.Now().UnixNano(), ext)
-	path := filepath.Join(a.uploadDir, name)
+	ext := strings.ToLower(filepath.Ext(header.Filename))
 
-	out, err := os.Create(path)
+	// Read first 512 bytes for content type detection
+	buf := make([]byte, 512)
+	n, _ := file.Read(buf)
+	detected := http.DetectContentType(buf[:n])
+	file.Seek(0, 0)
+
+	// For image blocks, validate content matches a safe image type
+	blockType := r.FormValue("block_type")
+	if blockType == "image" {
+		if !safeImageExts[ext] || !strings.HasPrefix(detected, "image/") {
+			http.Error(w, `{"error":"invalid image file"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Generate unique filename
+	name := fmt.Sprintf("%s_%d%s", generateID(), time.Now().UnixNano(), ext)
+	fpath := filepath.Join(a.uploadDir, name)
+
+	out, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -317,10 +356,91 @@ func (a *App) processUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record file ownership (server-side, not forgeable by editors)
+	if err := a.insertFile(name, pageID); err != nil {
+		serverError(w, err)
+		return
+	}
+
 	writeJSON(w, map[string]string{
 		"src":      "/uploads/" + name,
 		"filename": header.Filename,
 	})
+}
+
+// ---- Secure upload serving ----
+
+func (a *App) validateUploadPath(filename string) (string, bool) {
+	if filename == "" || strings.Contains(filename, "..") || strings.ContainsAny(filename, "/\\") {
+		return "", false
+	}
+	filePath := filepath.Join(a.uploadDir, filename)
+	absUpload, err := filepath.Abs(a.uploadDir)
+	if err != nil {
+		return "", false
+	}
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(absFile, absUpload+string(filepath.Separator)) {
+		return "", false
+	}
+	return filePath, true
+}
+
+func (a *App) serveFileSecure(w http.ResponseWriter, r *http.Request, filePath string) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	inline := false
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if safeImageExts[ext] {
+		f, err := os.Open(filePath)
+		if err == nil {
+			buf := make([]byte, 512)
+			n, _ := f.Read(buf)
+			f.Close()
+			detected := http.DetectContentType(buf[:n])
+			if strings.HasPrefix(detected, "image/") && detected != "image/svg+xml" {
+				inline = true
+			}
+		}
+	}
+
+	if !inline {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+	http.ServeFile(w, r, filePath)
+}
+
+func (a *App) handleServeUpload(w http.ResponseWriter, r *http.Request) {
+	filename := r.PathValue("filename")
+	filePath, ok := a.validateUploadPath(filename)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	a.serveFileSecure(w, r, filePath)
+}
+
+func (a *App) handleSharedServeUpload(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	filename := r.PathValue("filename")
+	share, err := a.getShareByToken(token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	filePath, ok := a.validateUploadPath(filename)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !a.fileExistsForPage(filename, share.PageID) {
+		http.NotFound(w, r)
+		return
+	}
+	a.serveFileSecure(w, r, filePath)
 }
 
 // ---- Shared API endpoints ----
@@ -329,7 +449,7 @@ func (a *App) handleSharedGetPage(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	share, err := a.getShareByToken(token)
 	if err != nil {
-		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
 	page, err := a.getPage(share.PageID)
@@ -362,7 +482,7 @@ func (a *App) handleSharedCreateComment(w http.ResponseWriter, r *http.Request) 
 	token := r.PathValue("token")
 	share, err := a.getShareByToken(token)
 	if err != nil {
-		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
 	if share.KeyType != "commenter" && share.KeyType != "editor" {
@@ -394,7 +514,7 @@ func (a *App) handleSharedSaveBlocks(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	share, err := a.getShareByToken(token)
 	if err != nil {
-		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
 	if share.KeyType != "editor" {
@@ -419,15 +539,14 @@ func (a *App) handleSharedUpload(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	share, err := a.getShareByToken(token)
 	if err != nil {
-		http.Error(w, `{"error":"invalid token"}`, http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
 	if share.KeyType != "editor" {
 		http.Error(w, `{"error":"no upload access"}`, http.StatusForbidden)
 		return
 	}
-	_ = share
-	a.processUpload(w, r)
+	a.processUpload(w, r, share.PageID)
 }
 
 // ---- Helpers ----
@@ -438,6 +557,6 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 }
 
 func serverError(w http.ResponseWriter, err error) {
-	msg := strings.ReplaceAll(err.Error(), `"`, `\"`)
-	http.Error(w, fmt.Sprintf(`{"error":"%s"}`, msg), http.StatusInternalServerError)
+	log.Printf("Internal error: %v", err)
+	http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 }

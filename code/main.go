@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -27,7 +28,7 @@ func main() {
 		uploadDir = "../data/uploads"
 	}
 
-	os.MkdirAll(uploadDir, 0755)
+	os.MkdirAll(uploadDir, 0700)
 
 	db := initDB(dbPath)
 	defer db.Close()
@@ -47,7 +48,10 @@ func main() {
 
 	// Static files (served from disk so changes don't require recompilation)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
-	mux.Handle("GET /uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadDir))))
+
+	// Uploads: authenticated serving only
+	mux.HandleFunc("GET /uploads/{filename}", app.adminAuth(app.handleServeUpload))
+	mux.HandleFunc("GET /api/shared/{token}/uploads/{filename}", app.handleSharedServeUpload)
 
 	// API - pages (admin)
 	mux.HandleFunc("GET /api/pages", app.adminAuth(app.handleListPages))
@@ -70,8 +74,8 @@ func main() {
 	mux.HandleFunc("POST /api/pages/{id}/comments", app.adminAuth(app.handleCreateComment))
 	mux.HandleFunc("PUT /api/comments/{id}/resolve", app.adminAuth(app.handleResolveComment))
 
-	// API - upload (admin)
-	mux.HandleFunc("POST /api/upload", app.adminAuth(app.handleUpload))
+	// API - upload (admin, scoped to page)
+	mux.HandleFunc("POST /api/pages/{id}/upload", app.adminAuth(app.handleUpload))
 
 	// API - shared endpoints
 	mux.HandleFunc("GET /api/shared/{token}/page", app.handleSharedGetPage)
@@ -79,6 +83,14 @@ func main() {
 	mux.HandleFunc("PUT /api/shared/{token}/blocks", app.handleSharedSaveBlocks)
 	mux.HandleFunc("POST /api/shared/{token}/upload", app.handleSharedUpload)
 
+	// Limit request body size: 10MB for JSON, uploads set their own limit
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	log.Printf("Server starting on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

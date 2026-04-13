@@ -41,6 +41,20 @@ function api(method, path, body) {
 	});
 }
 
+function sharedUploadUrl(src) {
+	if (!src || src.indexOf('/uploads/') === -1) return src;
+	var filename = src.split('/uploads/').pop().split('?')[0];
+	return '/api/shared/' + shareToken + '/uploads/' + encodeURIComponent(filename);
+}
+
+function cleanUploadPath(src) {
+	if (!src) return src;
+	var idx = src.lastIndexOf('/uploads/');
+	if (idx === -1) return src;
+	var filename = src.substring(idx + '/uploads/'.length).split('?')[0];
+	return '/uploads/' + filename;
+}
+
 // ---- Init ----
 function init() {
 	loadSharedPage().then(function() {
@@ -274,7 +288,7 @@ function createBlockEl(block) {
 		imgDiv.contentEditable = 'false';
 		if (props.src) {
 			var img = document.createElement('img');
-			img.src = props.src;
+			img.src = sharedUploadUrl(props.src);
 			imgDiv.appendChild(img);
 		} else if (isEditor) {
 			var placeholder = document.createElement('div');
@@ -289,7 +303,7 @@ function createBlockEl(block) {
 		fileDiv.className = 'block-content file-block';
 		fileDiv.contentEditable = 'false';
 		if (props.src) {
-			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(props.src) + '" download="' + escapeHtml(props.filename || '') + '">' + escapeHtml(props.filename || block.content || 'Download') + '</a>';
+			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(sharedUploadUrl(props.src)) + '" download="' + escapeHtml(props.filename || '') + '">' + escapeHtml(props.filename || block.content || 'Download') + '</a>';
 		} else if (isEditor) {
 			var uploadBtn = document.createElement('div');
 			uploadBtn.className = 'image-upload-placeholder';
@@ -354,7 +368,7 @@ function createBlockEl(block) {
 	} else {
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = block.content || '<br>';
+		content.innerHTML = DOMPurify.sanitize(block.content || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 	}
@@ -720,7 +734,7 @@ function handleKeyDown(e) {
 							setCursorToBlock(prev, true);
 							if (myHtml) {
 								setTimeout(function() {
-									prevContent.innerHTML = cleanContent(prevContent.innerHTML) + myHtml;
+									prevContent.innerHTML = DOMPurify.sanitize(cleanContent(prevContent.innerHTML) + myHtml);
 									setCursorToBlock(prev, true);
 								}, 0);
 							}
@@ -772,10 +786,13 @@ function handlePaste(e) {
 	var wrapper = getCurrentBlockWrapper();
 	if (!wrapper) return;
 	if (wrapper.dataset.type === 'code') return;
-	var text = e.clipboardData.getData('text/html') || e.clipboardData.getData('text/plain');
-	if (!e.clipboardData.getData('text/html')) {
-		e.preventDefault();
-		document.execCommand('insertText', false, text);
+
+	e.preventDefault();
+	var html = e.clipboardData.getData('text/html');
+	if (html) {
+		document.execCommand('insertHTML', false, DOMPurify.sanitize(html));
+	} else {
+		document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
 	}
 }
 
@@ -822,7 +839,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		else wrapper.prepend(newCb);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -855,7 +872,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		else wrapper.prepend(toggleIcon);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -868,7 +885,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		else wrapper.prepend(numSpan);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -969,7 +986,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		wrapper.classList.remove('checked');
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -1217,11 +1234,12 @@ function uploadImage(wrapper) {
 		if (!input.files[0]) return;
 		var form = new FormData();
 		form.append('file', input.files[0]);
+		form.append('block_type', 'image');
 		api('POST', '/api/shared/' + shareToken + '/upload', form).then(function(result) {
 			var imgDiv = wrapper.querySelector('.image-block');
 			imgDiv.innerHTML = '';
 			var img = document.createElement('img');
-			img.src = result.src;
+			img.src = sharedUploadUrl(result.src);
 			imgDiv.appendChild(img);
 			scheduleAutoSave();
 		});
@@ -1236,9 +1254,10 @@ function uploadFile(wrapper) {
 		if (!input.files[0]) return;
 		var form = new FormData();
 		form.append('file', input.files[0]);
+		form.append('block_type', 'file');
 		api('POST', '/api/shared/' + shareToken + '/upload', form).then(function(result) {
 			var fileDiv = wrapper.querySelector('.file-block');
-			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(result.src) + '" download="' + escapeHtml(result.filename) + '">' + escapeHtml(result.filename) + '</a>';
+			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(sharedUploadUrl(result.src)) + '" download="' + escapeHtml(result.filename) + '">' + escapeHtml(result.filename) + '</a>';
 			wrapper.querySelector('.block-content').dataset.src = result.src;
 			wrapper.querySelector('.block-content').dataset.filename = result.filename;
 			scheduleAutoSave();
@@ -1288,13 +1307,13 @@ function collectBlocks() {
 			var img = wrapper.querySelector('img');
 			properties.src = img ? img.src : '';
 			if (properties.src && properties.src.indexOf('/uploads/') !== -1) {
-				properties.src = '/uploads/' + properties.src.split('/uploads/').pop();
+				properties.src = cleanUploadPath(properties.src);
 			}
 		} else if (type === 'file') {
 			var link = wrapper.querySelector('.file-block a');
 			if (link) {
 				content = link.textContent;
-				properties.src = link.getAttribute('href') || '';
+				properties.src = cleanUploadPath(link.getAttribute('href') || '');
 				properties.filename = link.getAttribute('download') || content;
 			}
 		} else if (type === 'page_link') {

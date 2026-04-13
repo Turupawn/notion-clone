@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"os"
 )
@@ -10,7 +11,8 @@ import (
 func readTemplate(name string) string {
 	data, err := os.ReadFile("templates/" + name)
 	if err != nil {
-		return "Error loading template: " + err.Error()
+		log.Printf("Failed to load template %s: %v", name, err)
+		return "Internal server error"
 	}
 	return string(data)
 }

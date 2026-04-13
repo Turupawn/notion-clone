@@ -42,13 +42,13 @@ type Block struct {
 }
 
 type Share struct {
-	ID         string `json:"id"`
-	PageID     string `json:"page_id"`
-	Alias      string `json:"alias"`
-	Token      string `json:"token"`
-	CanComment int    `json:"can_comment"`
-	KeyType    string `json:"key_type"`
-	CreatedAt  string `json:"created_at"`
+	ID        string  `json:"id"`
+	PageID    string  `json:"page_id"`
+	Alias     string  `json:"alias"`
+	Token     string  `json:"token"`
+	KeyType   string  `json:"key_type"`
+	CreatedAt string  `json:"created_at"`
+	ExpiresAt *string `json:"expires_at"`
 }
 
 type Comment struct {
@@ -114,12 +114,17 @@ func initDB(path string) *sql.DB {
 		page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
 		alias TEXT NOT NULL,
 		token TEXT NOT NULL UNIQUE,
-		can_comment INTEGER DEFAULT 1,
 		key_type TEXT NOT NULL DEFAULT 'viewer',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		expires_at DATETIME
 	);
 	CREATE INDEX IF NOT EXISTS idx_shares_token ON shares(token);
 	CREATE INDEX IF NOT EXISTS idx_shares_page ON shares(page_id);
+	CREATE TABLE IF NOT EXISTS files (
+		filename TEXT PRIMARY KEY,
+		page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
 	CREATE TABLE IF NOT EXISTS comments (
 		id TEXT PRIMARY KEY,
 		page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -351,7 +356,7 @@ func (a *App) saveBlocks(pageID string, blocks []Block) error {
 // ---- Share operations ----
 
 func (a *App) listShares(pageID string) ([]Share, error) {
-	rows, err := a.db.Query("SELECT id, page_id, alias, token, can_comment, key_type, created_at FROM shares WHERE page_id = ?", pageID)
+	rows, err := a.db.Query("SELECT id, page_id, alias, token, key_type, created_at, expires_at FROM shares WHERE page_id = ?", pageID)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +365,7 @@ func (a *App) listShares(pageID string) ([]Share, error) {
 	var shares []Share
 	for rows.Next() {
 		var s Share
-		err := rows.Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.KeyType, &s.CreatedAt)
+		err := rows.Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.KeyType, &s.CreatedAt, &s.ExpiresAt)
 		if err != nil {
 			return nil, err
 		}
@@ -371,8 +376,8 @@ func (a *App) listShares(pageID string) ([]Share, error) {
 
 func (a *App) getShareByToken(token string) (*Share, error) {
 	var s Share
-	err := a.db.QueryRow("SELECT id, page_id, alias, token, can_comment, key_type, created_at FROM shares WHERE token = ?", token).
-		Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.CanComment, &s.KeyType, &s.CreatedAt)
+	err := a.db.QueryRow("SELECT id, page_id, alias, token, key_type, created_at, expires_at FROM shares WHERE token = ? AND expires_at > datetime('now')", token).
+		Scan(&s.ID, &s.PageID, &s.Alias, &s.Token, &s.KeyType, &s.CreatedAt, &s.ExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -382,12 +387,9 @@ func (a *App) getShareByToken(token string) (*Share, error) {
 func (a *App) createShare(pageID, alias, keyType string) (*Share, error) {
 	id := generateID()
 	token := generateToken()
-	canComment := 0
-	if keyType == "commenter" || keyType == "editor" {
-		canComment = 1
-	}
-	_, err := a.db.Exec("INSERT INTO shares (id, page_id, alias, token, can_comment, key_type) VALUES (?, ?, ?, ?, ?, ?)",
-		id, pageID, alias, token, canComment, keyType)
+	expiresAt := time.Now().UTC().Add(30 * 24 * time.Hour).Format("2006-01-02 15:04:05")
+	_, err := a.db.Exec("INSERT INTO shares (id, page_id, alias, token, key_type, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+		id, pageID, alias, token, keyType, expiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -469,3 +471,15 @@ func (a *App) resolveComment(id string) error {
 	_, err := a.db.Exec("UPDATE comments SET resolved = 1 WHERE id = ? OR parent_comment_id = ?", id, id)
 	return err
 }
+
+func (a *App) insertFile(filename, pageID string) error {
+	_, err := a.db.Exec("INSERT OR REPLACE INTO files (filename, page_id) VALUES (?, ?)", filename, pageID)
+	return err
+}
+
+func (a *App) fileExistsForPage(filename, pageID string) bool {
+	var count int
+	a.db.QueryRow("SELECT COUNT(*) FROM files WHERE filename = ? AND page_id = ?", filename, pageID).Scan(&count)
+	return count > 0
+}
+

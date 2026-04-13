@@ -610,7 +610,7 @@ function createBlockEl(block) {
 		// paragraph, heading1-3, bullet_list, quote, callout
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = block.content || '<br>';
+		content.innerHTML = DOMPurify.sanitize(block.content || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 	}
@@ -1040,7 +1040,7 @@ function handleKeyDown(e) {
 							setCursorToBlock(prev, true);
 							if (myHtml) {
 								setTimeout(function() {
-									prevContent.innerHTML = cleanContent(prevContent.innerHTML) + myHtml;
+									prevContent.innerHTML = DOMPurify.sanitize(cleanContent(prevContent.innerHTML) + myHtml);
 									// Set cursor position
 									setCursorToBlock(prev, true);
 								}, 0);
@@ -1108,11 +1108,12 @@ function handlePaste(e) {
 	if (!wrapper) return;
 	if (wrapper.dataset.type === 'code') return; // Let default paste in code blocks
 
-	// Paste as plain text in regular blocks
-	var text = e.clipboardData.getData('text/html') || e.clipboardData.getData('text/plain');
-	if (!e.clipboardData.getData('text/html')) {
-		e.preventDefault();
-		document.execCommand('insertText', false, text);
+	e.preventDefault();
+	var html = e.clipboardData.getData('text/html');
+	if (html) {
+		document.execCommand('insertHTML', false, DOMPurify.sanitize(html));
+	} else {
+		document.execCommand('insertText', false, e.clipboardData.getData('text/plain'));
 	}
 }
 
@@ -1167,7 +1168,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		handle.after(newCb);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -1199,7 +1200,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		handle.after(toggleIcon);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -1211,7 +1212,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		handle.after(numSpan);
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -1323,7 +1324,7 @@ function rebuildBlock(wrapper, newType, checked) {
 		wrapper.classList.remove('checked');
 		var content = document.createElement('div');
 		content.className = 'block-content';
-		content.innerHTML = oldHtml || '<br>';
+		content.innerHTML = DOMPurify.sanitize(oldHtml || '<br>');
 		wrapper.appendChild(content);
 		ensureBR(content);
 		setCursorToBlock(wrapper, false);
@@ -1616,7 +1617,8 @@ function uploadImage(wrapper) {
 		if (!input.files[0]) return;
 		var form = new FormData();
 		form.append('file', input.files[0]);
-		api('POST', '/api/upload', form).then(function(result) {
+		form.append('block_type', 'image');
+		api('POST', '/api/pages/' + currentPageId + '/upload', form).then(function(result) {
 			var imgDiv = wrapper.querySelector('.image-block');
 			imgDiv.innerHTML = '';
 			var img = document.createElement('img');
@@ -1635,7 +1637,8 @@ function uploadFile(wrapper) {
 		if (!input.files[0]) return;
 		var form = new FormData();
 		form.append('file', input.files[0]);
-		api('POST', '/api/upload', form).then(function(result) {
+		form.append('block_type', 'file');
+		api('POST', '/api/pages/' + currentPageId + '/upload', form).then(function(result) {
 			var fileDiv = wrapper.querySelector('.file-block');
 			fileDiv.innerHTML = '📎 <a href="' + escapeHtml(result.src) + '" download="' + escapeHtml(result.filename) + '">' + escapeHtml(result.filename) + '</a>';
 			wrapper.querySelector('.block-content').dataset.src = result.src;
@@ -2152,7 +2155,7 @@ function renderShares(shares) {
 
 		var info = document.createElement('div');
 		info.className = 'share-info';
-		info.innerHTML = '<div class="share-alias">' + escapeHtml(s.alias) + '</div><div class="share-type">' + s.key_type + '</div>';
+		info.innerHTML = '<div class="share-alias">' + escapeHtml(s.alias) + '</div><div class="share-type">' + escapeHtml(s.key_type) + '</div>';
 		div.appendChild(info);
 
 		var link = document.createElement('span');

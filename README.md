@@ -19,7 +19,7 @@ To stop paying Notion and handing them our data.
 ```bash
 [ -d data ] || cp -r dummy_data data
 cd code && go mod tidy && go build -o notion-clone .
-ADMIN_KEY=your-key ./notion-clone
+ADMIN_KEY=<YOURKEY> PORT=3001 DB_PATH=~/Context/notes/data.db UPLOAD_DIR=~/Context/notes/uploads ./notion-clone
 ```
 
 Env vars: `ADMIN_KEY`, `PORT` (default 8080), `DB_PATH` (default ../data/data.db), `UPLOAD_DIR` (default ../data/uploads).
